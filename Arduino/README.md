@@ -6,6 +6,8 @@ It contains two simple simulations:
 
 ## Simulation 1 — Basic CAN Message Transmission
 
+[Watch the simple CAN demonstration](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prathambansal_jklu_edu_in/IQCike3XNBnnToplAqMb4-pEAex8dkzbQV4d-UnmfVh7wJw?e=PJ1nON)
+
 The first simulation is used to verify basic CAN communication between two nodes.
 
 The transmitter sends short text messages such as:
@@ -33,6 +35,8 @@ Both MCP2515 modules are configured for:
 ---
 
 ## Simulation 2 — DHT11 Temperature and Humidity over CAN
+
+[Watch the CAN + DHT11 Demonstration](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prathambansal_jklu_edu_in/IQBjYMqr_Ot-SqB5dDFY5_8MAXcOkcdM6om6rojH7EmYRTg?e=ZLxitI)
 
 The second simulation extends the CAN setup by connecting a DHT11 temperature and humidity sensor to the transmitter.
 
