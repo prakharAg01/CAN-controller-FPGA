@@ -108,3 +108,7 @@ Temp: 28
 - `LiquidCrystal_I2C`
 
 The project demonstrates basic CAN message transmission and a simple practical application where sensor data from a DHT11 is transferred between two Arduino nodes over a CAN bus.
+
+## Reference
+Arduino CAN Bus Tutorial | Interfacing MCP2515 CAN Module with Arduino by How to Electronics
+https://www.youtube.com/watch?v=QYX_XOjjGOM&t=132s
