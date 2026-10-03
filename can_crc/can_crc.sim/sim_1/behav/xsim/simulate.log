@@ -1,0 +1,10 @@
+Time resolution is 1 ps
+[PASS]                        T1 all-zero 20 bits crc=0x0000
+[PASS]                     T2 alternating 12 bits crc=0x77bb
+[PASS]               T3 SOF+ID7FF+RTR+IDE+r0+DLC0 crc=0x272f
+[PASS]                            T4 single 1 bit crc=0x4599
+[PASS]                     T5 calc_en=0 holds CRC crc=0x4eab
+----------------------------------------------------
+ALL 5 CRC TESTS PASSED
+----------------------------------------------------
+$finish called at time : 760 ns : File "E:/MajorProject/can_crc/can_crc.srcs/sim_1/new/tb_can_crc.sv" Line 190

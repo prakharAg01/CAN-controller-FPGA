@@ -1,0 +1,7 @@
+Running: xsim.dir/can_stuff_destuff_demo_top_behav/xsimk.exe -simmode gui -wdb can_stuff_destuff_demo_top_behav.wdb -simrunnum 0 -socket 64736
+Design successfully loaded
+Design Loading Memory Usage: 10464 KB (Peak: 10464 KB)
+Design Loading CPU Usage: 77 ms
+Simulation completed
+Simulation Memory Usage: 11028 KB (Peak: 11028 KB)
+Simulation CPU Usage: 108 ms

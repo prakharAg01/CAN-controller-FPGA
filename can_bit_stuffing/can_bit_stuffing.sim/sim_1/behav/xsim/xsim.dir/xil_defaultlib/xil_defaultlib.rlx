@@ -1,0 +1,9 @@
+0.7
+2020.2
+Oct 13 2023
+20:47:58
+D:/new/can_bit_stuffing/can_bit_stuffing.sim/sim_1/behav/xsim/glbl.v,1697210495,verilog,,,,glbl,,uvm,,,,,,
+D:/new/can_bit_stuffing/can_bit_stuffing.srcs/sim_1/new/tb_can_bit_stuffing.sv,1791013953,systemVerilog,,,,tb_can_bit_stuffing,,uvm,,,,,,
+D:/new/can_bit_stuffing/can_bit_stuffing.srcs/sources_1/new/can_bit_destuffer.sv,1791013873,systemVerilog,,D:/new/can_bit_stuffing/can_bit_stuffing.srcs/sources_1/new/can_bit_stuffer.sv,,can_bit_destuffer,,uvm,,,,,,
+D:/new/can_bit_stuffing/can_bit_stuffing.srcs/sources_1/new/can_bit_stuffer.sv,1791013862,systemVerilog,,D:/new/can_bit_stuffing/can_bit_stuffing.srcs/sim_1/new/tb_can_bit_stuffing.sv,,can_bit_stuffer,,uvm,,,,,,
+D:/new/can_bit_stuffing/can_bit_stuffing.srcs/sources_1/new/can_stuff_destuff_demo_top.sv,1791013887,systemVerilog,,,,can_stuff_destuff_demo_top,,uvm,,,,,,

@@ -1,0 +1,14 @@
+#-----------------------------------------------------------
+# Vivado v2023.2 (64-bit)
+# SW Build 4029153 on Fri Oct 13 20:14:34 MDT 2023
+# IP Build 4028589 on Sat Oct 14 00:45:43 MDT 2023
+# SharedData Build 4025554 on Tue Oct 10 17:18:54 MDT 2023
+# Start of session at: Sat Oct  3 16:41:25 2026
+# Process ID: 23272
+# Current directory: E:/MajorProject/can_crc/can_crc.runs/impl_1
+# Command line: vivado.exe -log can_crc_demo_top.vdi -applog -product Vivado -messageDb vivado.pb -mode batch -source can_crc_demo_top.tcl -notrace
+# Log file: E:/MajorProject/can_crc/can_crc.runs/impl_1/can_crc_demo_top.vdi
+# Journal file: E:/MajorProject/can_crc/can_crc.runs/impl_1\vivado.jou
+# Running On: LAPTOP-QFA7V704, OS: Windows, CPU Frequency: 3187 MHz, CPU Physical cores: 4, Host memory: 16952 MB
+#-----------------------------------------------------------
+source can_crc_demo_top.tcl -notrace

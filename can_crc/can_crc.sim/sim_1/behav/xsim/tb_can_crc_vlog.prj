@@ -1,0 +1,10 @@
+# compile verilog/system verilog design source files
+sv xil_defaultlib  \
+"../../../../can_crc.srcs/sources_1/new/can_crc.sv" \
+"../../../../can_crc.srcs/sim_1/new/tb_can_crc.sv" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort

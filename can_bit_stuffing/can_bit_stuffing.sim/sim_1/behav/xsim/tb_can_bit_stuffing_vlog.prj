@@ -1,0 +1,11 @@
+# compile verilog/system verilog design source files
+sv xil_defaultlib  \
+"../../../../can_bit_stuffing.srcs/sources_1/new/can_bit_destuffer.sv" \
+"../../../../can_bit_stuffing.srcs/sources_1/new/can_bit_stuffer.sv" \
+"../../../../can_bit_stuffing.srcs/sim_1/new/tb_can_bit_stuffing.sv" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort
