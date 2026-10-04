@@ -53,6 +53,7 @@ Tests include:
 - trailing stuff-bit cases
 
 ## FPGA Verification
+[Watch the implementation of Stuffer on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQA1kvPVU3V8ToO6Xl6lxWgNAVOErDggriFbZTn9bCVfqDM?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WM0cXw).
 
 Implemented on the Digilent Nexys 4 DDR.
 
@@ -96,6 +97,7 @@ The recovered data stream is compared against the original input stream.
 The testbench also verifies `stuff_error` behavior.
 
 ## FPGA Verification
+[Watch the implementation of the crc on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQAUSu0wjZdlSrW3hum8-HPCAUnui2mtVKKSlad7LdSX0uU?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WKHip6).
 
 The stuffer output was connected internally to the destuffer input.
 
