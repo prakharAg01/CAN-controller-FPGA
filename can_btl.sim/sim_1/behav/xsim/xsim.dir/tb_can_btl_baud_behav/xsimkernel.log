@@ -1,0 +1,7 @@
+Running: xsim.dir/tb_can_btl_baud_behav/xsimk.exe -simmode gui -wdb tb_can_btl_baud_behav.wdb -simrunnum 0 -socket 51320
+Design successfully loaded
+Design Loading Memory Usage: 10904 KB (Peak: 10904 KB)
+Design Loading CPU Usage: 31 ms
+Simulation completed
+Simulation Memory Usage: 19728 KB (Peak: 19728 KB)
+Simulation CPU Usage: 421 ms

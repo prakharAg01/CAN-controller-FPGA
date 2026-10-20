@@ -1,0 +1,7 @@
+Running: xsim.dir/tb_can_btl_loopback_behav/xsimk.exe -simmode gui -wdb tb_can_btl_loopback_behav.wdb -simrunnum 0 -socket 53402
+Design successfully loaded
+Design Loading Memory Usage: 10024 KB (Peak: 10024 KB)
+Design Loading CPU Usage: 0 ms
+Simulation completed
+Simulation Memory Usage: 20064 KB (Peak: 20064 KB)
+Simulation CPU Usage: 796 ms

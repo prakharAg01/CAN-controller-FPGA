@@ -1,0 +1,10 @@
+# compile verilog/system verilog design source files
+sv xil_defaultlib  \
+"../../../../can_btl.srcs/sources_1/new/can_tx_shift.sv" \
+"../../../../can_btl.srcs/sim_1/new/tb_can_tx_shift.sv" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort

@@ -1,0 +1,14 @@
+0.7
+2020.2
+May 22 2024
+19:03:11
+C:/Users/prath/can_btl/can_btl.sim/sim_1/behav/xsim/glbl.v,1708598507,verilog,,,,glbl,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_btl.sv,1791897398,systemVerilog,,,,tb_can_btl,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_btl_baud.sv,1792168495,systemVerilog,,,,tb_can_btl_baud,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_btl_loopback.sv,1791738540,systemVerilog,,,,tb_can_btl_loopback,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_btl_sync.sv,1792168729,systemVerilog,,,,tb_can_btl_sync,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_tx_shift.sv,1792308567,systemVerilog,,,,tb_can_tx_shift,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sources_1/imports/new/can_bit_destuffer.sv,1790687422,systemVerilog,,C:/Users/prath/can_btl/can_btl.srcs/sources_1/imports/new/can_bit_stuffer.sv,,can_bit_destuffer,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sources_1/imports/new/can_bit_stuffer.sv,1790687345,systemVerilog,,C:/Users/prath/can_btl/can_btl.srcs/sources_1/new/can_btl.sv,,can_bit_stuffer,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sources_1/new/can_btl.sv,1791897381,systemVerilog,,C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_btl_baud.sv,,can_btl,,uvm,,,,,,
+C:/Users/prath/can_btl/can_btl.srcs/sources_1/new/can_tx_shift.sv,1792308485,systemVerilog,,C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_tx_shift.sv,,can_tx_shift,,uvm,,,,,,

@@ -1,0 +1,11 @@
+Time resolution is 1 ps
+[PASS] T1 lengths 1..64, 3 shift_en patterns, remaining/last/done
+[PASS] T2 same-clock reload: bubble-free, order, counts
+[PASS] T3 load while busy rejected, running field untouched
+[PASS] T4 len 0 rejected, len 70 clamped to 64
+[PASS] T5 clear aborts a running field, next load works
+[PASS] T6 shift_en while empty does nothing
+----------------------------------------------------
+ALL TX SHIFT TESTS PASSED
+----------------------------------------------------
+$finish called at time : 180440 ns : File "C:/Users/prath/can_btl/can_btl.srcs/sim_1/new/tb_can_tx_shift.sv" Line 267
