@@ -23,8 +23,11 @@ Each CAN function is developed and verified as a separate RTL module first. Afte
 | Bit Stuffer | Completed | Completed | Verified |
 | Bit Destuffer | Completed | Completed | Verified |
 | CRC-15 | Completed | Completed | Verified |
+| Bit Timing Logic (BTL) | Testbenches included | In development | Implemented |
+| TX Serializer | Testbench included | Demo video | Implemented |
+| RX Deserializer | Testbench included | Demo video | Implemented |
 
-Add new modules to this table as development continues.
+The CAN BTL RTL, Vivado project, and testbenches are organized under [`can_btl/`](./can_btl/).
 
 ---
 
@@ -175,11 +178,61 @@ Input 101010101010 -> CRC 0x77BB
 
 ---
 
+# 4. CAN Bit Timing Logic (BTL)
+
+## Purpose
+
+The BTL generates time-quanta ticks, bit ticks, and sample points from the
+configured bit-rate prescaler and CAN bit segments. It samples the receive bus,
+supports hard synchronization at start of frame, and resynchronizes during a
+frame using the synchronization jump width (SJW).
+
+## Files
+
+```text
+can_btl/can_btl.srcs/sources_1/new/can_btl.sv
+can_btl/can_btl.srcs/sim_1/new/tb_can_btl.sv
+can_btl/can_btl.srcs/sim_1/new/tb_can_btl_baud.sv
+can_btl/can_btl.srcs/sim_1/new/tb_can_btl_sync.sv
+```
+
+The BTL testbenches cover bit timing, baud configuration, hard sync, and
+resynchronization behavior.
+
+---
+
+# 5. CAN Serializer and Deserializer
+
+## Purpose
+
+The TX serializer loads frame fields and shifts them out most-significant bit
+first. The RX deserializer collects incoming de-stuffed bits into fields of a
+configured length. These modules provide the transmit and receive shift
+registers for assembling and parsing CAN frame data.
+
+## Files
+
+```text
+can_btl/can_btl.srcs/sources_1/new/can_tx_shift.sv
+can_btl/can_btl.srcs/sources_1/new/can_rx_shift.sv
+can_btl/can_btl.srcs/sim_1/new/tb_can_tx_shift.sv
+can_btl/can_btl.srcs/sim_1/new/tb_can_rx_shift.sv
+can_btl/can_btl.srcs/sim_1/new/tb_can_shift_chain.sv
+```
+
+The TX serializer supports field loading, ready/valid handshaking, and
+bubble-free reloads. The RX deserializer signals when each configured-length
+field has been collected. Testbenches cover the individual shift registers and
+their chain.
+
+## FPGA Demonstration
+
+[Watch the FPGA implementation of the serializer and deserializer](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQDMzTgm2xkWRayTjft29vRSARhJACfPEV_SgnvLsn9wPJg?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=uY0ZRQ).
+
+---
+
 # Arduino Simulation
 
 A separate CAN simulation was also performed using Arduino hardware.
 
----
-
-
-Additional CAN controller modules will be added to this README independently as they are developed.
+Additional CAN controller modules will be documented here as they are developed.
