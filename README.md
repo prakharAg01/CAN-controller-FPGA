@@ -23,11 +23,10 @@ Each CAN function is developed and verified as a separate RTL module first. Afte
 | Bit Stuffer | Completed | Completed | Verified |
 | Bit Destuffer | Completed | Completed | Verified |
 | CRC-15 | Completed | Completed | Verified |
-| Bit Timing Logic (BTL) | Testbenches included | In development | Implemented |
-| TX Serializer | Testbench included | Demo video | Implemented |
-| RX Deserializer | Testbench included | Demo video | Implemented |
+| Bit Timing Logic (BTL) | Completed | In development | Implemented |
+| TX Serializer | Completed | Completed | Verified |
+| RX Deserializer | Completed | Completed | Verified |
 
-The CAN BTL RTL, Vivado project, and testbenches are organized under [`can_btl/`](./can_btl/).
 
 ---
 
@@ -56,7 +55,7 @@ Tests include:
 - trailing stuff-bit cases
 
 ## FPGA Verification
-[Watch the implementation of Stuffer on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQA1kvPVU3V8ToO6Xl6lxWgNAVOErDggriFbZTn9bCVfqDM?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WM0cXw).
+[Watch the implementation of Stuffer and DeStuffer on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQA1kvPVU3V8ToO6Xl6lxWgNAVOErDggriFbZTn9bCVfqDM?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WM0cXw).
 
 Implemented on the Digilent Nexys 4 DDR.
 
@@ -100,7 +99,7 @@ The recovered data stream is compared against the original input stream.
 The testbench also verifies `stuff_error` behavior.
 
 ## FPGA Verification
-[Watch the implementation of the crc on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQAUSu0wjZdlSrW3hum8-HPCAUnui2mtVKKSlad7LdSX0uU?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WKHip6).
+
 
 The stuffer output was connected internally to the destuffer input.
 
@@ -151,6 +150,7 @@ CAN header-like test -> CRC 0x272F
 The testbench also verifies that the CRC value remains unchanged when `calc_en = 0`.
 
 ## FPGA Verification
+[Watch the implementation of the CRC on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQAUSu0wjZdlSrW3hum8-HPCAUnui2mtVKKSlad7LdSX0uU?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WKHip6).
 
 Implemented on the Digilent Nexys 4 DDR.
 
