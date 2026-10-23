@@ -1,0 +1,10 @@
+# compile verilog/system verilog design source files
+sv xil_defaultlib  \
+"../../../../can_acceptance_filter.srcs/sources_1/new/can_acceptance_filter.sv" \
+"../../../../can_acceptance_filter.srcs/sim_1/new/tb_can_acceptance_filter.sv" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort

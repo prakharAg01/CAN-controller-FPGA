@@ -1,0 +1,4 @@
+Running: xsim.dir/tb_can_acceptance_filter_behav/xsimk.exe -simmode gui -wdb tb_can_acceptance_filter_behav.wdb -simrunnum 0 -socket 59062
+Design successfully loaded
+Design Loading Memory Usage: 10008 KB (Peak: 10008 KB)
+Design Loading CPU Usage: 62 ms
