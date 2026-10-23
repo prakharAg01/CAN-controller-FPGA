@@ -1,0 +1,30 @@
+Time resolution is 1 ps
+[PASS]                             T1  reset -> IDLE  state=0
+[PASS]                         T2  tx_request -> SOF  state=1
+[PASS]            T3a  after SOF tick -> ARBITRATION  state=2
+[PASS] T3b  11 ticks in ARBITRATION (still ARBITRATION)  state=2
+[PASS]                     T3c  12th tick -> CONTROL  state=3
+[PASS]       T4a  5 ticks in CONTROL (still CONTROL)  state=3
+[PASS]                         T4b  6th tick -> DATA  state=4
+[PASS]            T5a  15 ticks in DATA (still DATA)  state=4
+[PASS]                   T5b  16th tick -> CRC_FIELD  state=5
+[PASS]  T6a  15 ticks in CRC_FIELD (still CRC_FIELD)  state=5
+[PASS]                         T6b  16th tick -> ACK  state=6
+[PASS]                T7a  1 tick in ACK (still ACK)  state=6
+[PASS]                          T7b  2nd tick -> EOF  state=7
+[PASS]               T8a  6 ticks in EOF (still EOF)  state=7
+[PASS]                          T8b  7th tick -> IFS  state=8
+[PASS]               T9a  2 ticks in IFS (still IFS)  state=8
+[PASS]    T9b  3rd tick -> IDLE (no pending request)  state=0
+[PASS]   T10a  5 ticks CONTROL DLC=0 (still CONTROL)  state=3
+[PASS]     T10b  6th tick CONTROL DLC=0 -> CRC_FIELD  state=5
+[PASS]      T10c  returned to IDLE after DLC=0 frame  state=0
+[PASS]       T11  stuff_error in DATA -> ERROR_FRAME  state=9
+[PASS] T12a  13 ticks in ERROR_FRAME (still ERROR_FRAME)  state=9
+[PASS]                        T12b  14th tick -> IFS  state=8
+[PASS]           T12c  IFS -> IDLE after ERROR_FRAME  state=0
+[PASS]             T13  clear in ARBITRATION -> IDLE  state=0
+----------------------------------------------------
+ALL 25 BSP FSM TESTS PASSED
+----------------------------------------------------
+$finish called at time : 3390 ns : File "C:/Users/prath/can_bsp/can_bsp.srcs/sim_1/new/tb_can_bsp.sv" Line 326
