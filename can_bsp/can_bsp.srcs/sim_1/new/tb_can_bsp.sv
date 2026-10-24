@@ -16,10 +16,13 @@
 //   T7 - Step through ACK (2 ticks) -> EOF
 //   T8 - Step through EOF (7 ticks) -> IFS
 //   T9 - Step through IFS (3 ticks) -> IDLE (no pending tx_request)
-//   T10- DLC = 0 : CONTROL -> CRC_FIELD (skip DATA)
+//   T10- DLC = 0 : CONTROL bit stuffing (7 ticks) -> CRC_FIELD (skip DATA)
 //   T11- stuff_error during DATA -> ERROR_FRAME immediately
 //   T12- ERROR_FRAME steps through 14 ticks -> IFS
 //   T13- clear signal -> IDLE from any state
+//   T14- ARBITRATION & CONTROL bit-by-bit TX serialisation check
+//   T15- Lost arbitration detection (tx_en disabled on bus collision)
+//   T16- Dynamic bit stuffing in ARBITRATION (5 identical bits insert stuff bit)
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -136,6 +139,25 @@ module tb_can_bsp;
     endtask
 
     // -------------------------------------------------------------------------
+    // Helper: assert bit value and drive enable
+    // -------------------------------------------------------------------------
+    task automatic check_bit(
+        input string label,
+        input logic  expected_bit,
+        input logic  expected_en
+    );
+        @(negedge clk);
+        tests = tests + 1;
+        if (tx_bit_out !== expected_bit || tx_en !== expected_en) begin
+            $display("[FAIL] %-45s  expected bit=%b en=%b  got bit=%b en=%b",
+                     label, expected_bit, expected_en, tx_bit_out, tx_en);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] %-45s  bit=%b en=%b", label, tx_bit_out, tx_en);
+        end
+    endtask
+
+    // -------------------------------------------------------------------------
     // Helper: full reset and default signal values
     // -------------------------------------------------------------------------
     task automatic do_reset;
@@ -191,13 +213,21 @@ module tb_can_bsp;
         check_state("T3c  12th tick -> CONTROL", ST_CONTROL);
 
         // ==================================================================
-        // T4 -- 5 ticks stay in CONTROL; 6th tick -> DATA (DLC=2, non-zero)
+        // T4 -- CONTROL with DLC = 2:
+        // RTR(0), IDE(0), r0(0), DLC[3](0), DLC[2](0) = 5 consecutive zeros.
+        // Bit stuffer inserts a stuff bit ('1') after DLC[2].
+        // Ticks 1..5: first 4 protocol bits + 5th tick stuff bit
+        // Tick 6: DLC[1]=1 (still in CONTROL)
+        // Tick 7: DLC[0]=0 -> transitions to DATA
         // ==================================================================
         tick_n(5);
-        check_state("T4a  5 ticks in CONTROL (still CONTROL)", ST_CONTROL);
+        check_state("T4a  5 ticks in CONTROL (4 proto + 1 stuff bit)", ST_CONTROL);
 
         tick();
-        check_state("T4b  6th tick -> DATA", ST_DATA);
+        check_state("T4b  6th tick DLC[1]=1 (still CONTROL)", ST_CONTROL);
+
+        tick();
+        check_state("T4c  7th tick DLC[0]=0 -> DATA", ST_DATA);
 
         // ==================================================================
         // T5 -- DLC=2 -> 16 data bits. 15 ticks stay; 16th -> CRC_FIELD
@@ -247,23 +277,30 @@ module tb_can_bsp;
         check_state("T9b  3rd tick -> IDLE (no pending request)", ST_IDLE);
 
         // ==================================================================
-        // T10 -- DLC = 0: CONTROL should skip DATA and go straight to CRC_FIELD
+        // T10 -- DLC = 0: CONTROL bit stuffing & transition to CRC_FIELD
+        // IDE(0), r0(0), DLC[3:0](0000) -> 5 consecutive 0s triggers
+        // a complementary stuff bit ('1') on tick 6. The 7th tick sends
+        // DLC[0] ('0') and transitions directly to CRC_FIELD (skips DATA).
         // ==================================================================
         tx_dlc     = 4'd0;
         tx_request = 1'b1;
         @(negedge clk);                         // -> SOF
         tick();                                 // -> ARBITRATION
         tick_n(12);                             // -> CONTROL
-        // In CONTROL with DLC=0: after 6 ticks should go to CRC_FIELD
+        // In CONTROL with DLC=0: 5 ticks for the first 5 zeros
         tick_n(5);
         check_state("T10a  5 ticks CONTROL DLC=0 (still CONTROL)", ST_CONTROL);
+        // 6th tick sends stuff bit ('1'), holding FSM in CONTROL
         tick();
-        check_state("T10b  6th tick CONTROL DLC=0 -> CRC_FIELD", ST_CRC_FIELD);
+        check_state("T10b  6th tick stuff bit (still CONTROL)", ST_CONTROL);
+        // 7th tick sends DLC[0] ('0') -> transitions to CRC_FIELD
+        tick();
+        check_state("T10c  7th tick -> CRC_FIELD", ST_CRC_FIELD);
         // Clean up: step through to IDLE
         tick_n(16); tick_n(2); tick_n(7);
         tx_request = 1'b0;
         tick_n(3);
-        check_state("T10c  returned to IDLE after DLC=0 frame", ST_IDLE);
+        check_state("T10d  returned to IDLE after DLC=0 frame", ST_IDLE);
 
         // ==================================================================
         // T11 -- stuff_error during DATA -> ERROR_FRAME immediately
@@ -310,8 +347,118 @@ module tb_can_bsp;
         clear = 1'b0;
         check_state("T13  clear in ARBITRATION -> IDLE", ST_IDLE);
 
-
         tx_request = 1'b0;
+
+        // ==================================================================
+        // T14 -- ARBITRATION & CONTROL TX Serialisation bit-by-bit check
+        // tx_id = 11'h5A5 (101_1010_0101), tx_dlc = 4'd8 (1000)
+        // Verify tx_bit_out outputs the exact sequence MSB first without
+        // boundary stuff bits.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h5A5;
+        tx_dlc     = 4'd8;
+        tx_request = 1'b1;
+        @(negedge clk);   // -> SOF
+        tick();           // SOF tick -> enters ARBITRATION, bus holds SOF (0)
+        check_state("T14-init  SOF -> ARBITRATION", ST_ARBITRATION);
+
+        // 12 ticks inside ARBITRATION:
+        tick(); check_bit("T14-0  ARB bit 0 ID[10]=1", 1'b1, 1'b1);
+        tick(); check_bit("T14-1  ARB bit 1 ID[9]=0",  1'b0, 1'b1);
+        tick(); check_bit("T14-2  ARB bit 2 ID[8]=1",  1'b1, 1'b1);
+        tick(); check_bit("T14-3  ARB bit 3 ID[7]=1",  1'b1, 1'b1);
+        tick(); check_bit("T14-4  ARB bit 4 ID[6]=0",  1'b0, 1'b1);
+        tick(); check_bit("T14-5  ARB bit 5 ID[5]=1",  1'b1, 1'b1);
+        tick(); check_bit("T14-6  ARB bit 6 ID[4]=0",  1'b0, 1'b1);
+        tick(); check_bit("T14-7  ARB bit 7 ID[3]=0",  1'b0, 1'b1);
+        tick(); check_bit("T14-8  ARB bit 8 ID[2]=1",  1'b1, 1'b1);
+        tick(); check_bit("T14-9  ARB bit 9 ID[1]=0",  1'b0, 1'b1);
+        tick(); check_bit("T14-10 ARB bit 10 ID[0]=1", 1'b1, 1'b1);
+        tick(); check_bit("T14-11 ARB bit 11 RTR=0",   1'b0, 1'b1);
+        check_state("T14-arb  12 ARB ticks complete -> CONTROL", ST_CONTROL);
+
+        // 6 ticks in CONTROL: IDE=0, r0=0, DLC=4'b1000
+        tick(); check_bit("T14-ctrl0 IDE=0",    1'b0, 1'b1);
+        tick(); check_bit("T14-ctrl1 r0=0",     1'b0, 1'b1);
+        tick(); check_bit("T14-ctrl2 DLC[3]=1", 1'b1, 1'b1);
+        tick(); check_bit("T14-ctrl3 DLC[2]=0", 1'b0, 1'b1);
+        tick(); check_bit("T14-ctrl4 DLC[1]=0", 1'b0, 1'b1);
+        tick(); check_bit("T14-ctrl5 DLC[0]=0", 1'b0, 1'b1);
+        check_state("T14-ctrl 6 CTRL ticks complete -> DATA", ST_DATA);
+
+        // Clean up to IDLE (DLC=8 -> 64 data bits)
+        tick_n(64); tick_n(16); tick_n(2); tick_n(7);
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T14-end  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T15 -- Lost Arbitration Detection
+        // Node transmits tx_id = 11'h6A5 (110_1010_0101), tx_dlc = 4'd8.
+        // On bit 9 (recessive 1), external node drives rx_bit = 0.
+        // Node must detect arbitration loss, drop tx_en to 0, and continue
+        // as receiver.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h6A5;
+        tx_dlc     = 4'd8;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); // -> ARBITRATION
+        // Bit 10: ID[10] = 1. rx_bit matches (1).
+        tick();
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_bit("T15a  ID[10]=1 driving bus", 1'b1, 1'b1);
+
+        // Bit 9: ID[9] = 1. External bus pulls dominant (rx_bit = 0).
+        tick();
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        // Lost arbitration: tx_en must drop to 0
+        check_bit("T15b  lost arb: tx_en disabled", 1'b1, 1'b0);
+
+        // Finish remaining arbitration as receiver (10 ticks)
+        rx_bit = 1'b1;
+        tick_n(10);
+        check_state("T15c  after ARB -> CONTROL as listener", ST_CONTROL);
+        tick_n(6); tick_n(64); tick_n(16); tick_n(2); tick_n(7);
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T15d  listener returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T16 -- Dynamic Bit Stuffing in ARBITRATION
+        // tx_id = 11'h7D5 (111_1101_0101), tx_dlc = 4'd8
+        // ID[10..6] are five consecutive 1s. Bit stuffer must insert
+        // a dominant stuff bit ('0') at tick 6 and extend ARBITRATION to 13 ticks.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h7D5;
+        tx_dlc     = 4'd8;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); // SOF -> enters ARBITRATION
+        // First 5 bits of ARBITRATION (five 1s)
+        tick(); check_bit("T16-1  ID[10]=1", 1'b1, 1'b1);
+        tick(); check_bit("T16-2  ID[9]=1",  1'b1, 1'b1);
+        tick(); check_bit("T16-3  ID[8]=1",  1'b1, 1'b1);
+        tick(); check_bit("T16-4  ID[7]=1",  1'b1, 1'b1);
+        tick(); check_bit("T16-5  ID[6]=1 (5th one)", 1'b1, 1'b1);
+        // Tick 6: bit stuffer inserts dominant stuff bit ('0')
+        tick();
+        check_bit("T16-stuff  dominant stuff bit inserted", 1'b0, 1'b1);
+        check_state("T16-hold   stuff bit holds in ARBITRATION", ST_ARBITRATION);
+        // Tick 7: ID[5] = 0 sent
+        tick(); check_bit("T16-6  ID[5]=0", 1'b0, 1'b1);
+        // Remaining 6 bits: ID[4]=1, ID[3]=0, ID[2]=1, ID[1]=0, ID[0]=1, RTR=0
+        tick_n(6);
+        check_state("T16-end  after 13 ticks -> CONTROL", ST_CONTROL);
+        // Clean up to IDLE
+        tick_n(6); tick_n(64); tick_n(16); tick_n(2); tick_n(7);
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T16-idle returned to IDLE", ST_IDLE);
 
         // ==================================================================
         // Summary

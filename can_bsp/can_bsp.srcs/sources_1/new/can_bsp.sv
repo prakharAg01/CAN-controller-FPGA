@@ -97,14 +97,30 @@ module can_bsp (
     bsp_state_t state, next_state;
 
     // =========================================================================
+    // =========================================================================
     // Internal registers
     // =========================================================================
-    logic [6:0] bit_cnt;    // counts bits elapsed within the current state
-    logic [3:0] dlc_latch;  // DLC captured at the start of a frame
-    logic [5:0] data_bits;  // total data-field bits = dlc_latch * 8 (max 64)
+    logic [6:0]  bit_cnt;      // counts protocol bits elapsed within the current state
+    logic [10:0] id_latch;     // latched tx_id at SOF
+    logic [3:0]  dlc_latch;    // DLC captured at the start of a frame
+    logic [6:0]  data_bits;    // total data-field bits = dlc_latch * 8 (0..64)
+
+    // TX shift registers & arbitration
+    logic [11:0] arb_shift;    // {id_latch[10:0], RTR}, shifts MSB first
+    logic [5:0]  ctrl_shift;   // {IDE, r0, dlc_latch[3:0]}, shifts MSB first
+    logic        raw_tx_bit;   // un-stuffed protocol bit before the stuffer
+    logic        arb_lost;     // 1 = lost arbitration during ARBITRATION
+
+    // Bit stuffer interface wires
+    logic        stuff_en;
+    logic        stuffer_ready;
+    logic        stuffer_bit_out;
+    logic        stuffer_bit_out_valid;
+    logic        stuff_pending;
+    logic        stuffing_active;
 
     // =========================================================================
-    // Field-length parameters
+    // Field-length parameters (protocol bits)
     // =========================================================================
     localparam int LEN_SOF   = 1;
     localparam int LEN_ARB   = 12;   // 11-bit ID + RTR
@@ -116,34 +132,89 @@ module can_bsp (
     localparam int LEN_ERR   = 14;   // 6 dominant flag + 8 delimiter
 
     // =========================================================================
-    // State register
+    // Bit stuffer instantiation
+    // Active during SOF, ARBITRATION, and CONTROL (DATA and CRC will be enabled when implemented)
+    // =========================================================================
+    assign stuff_en = (state == SOF) || (state == ARBITRATION) || (state == CONTROL);
+
+    // Protocol tick: strobe when a real protocol bit is consumed by stuffer.
+    // When stuffing is disabled (or idle/delimiters), it matches bit_tick.
+    wire proto_tick = stuff_en ? stuffer_ready : bit_tick;
+
+    can_bit_stuffer u_stuffer (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .clear         (clear),
+        .bit_tick      (bit_tick),
+        .stuff_en      (stuff_en),
+        .data_valid    (1'b1),
+        .bit_in        (raw_tx_bit),
+        .ready         (stuffer_ready),
+        .stuff_pending (stuff_pending),
+        .bit_out       (stuffer_bit_out),
+        .bit_out_valid (stuffer_bit_out_valid),
+        .stuffing      (stuffing_active)
+    );
+
+    // =========================================================================
+    // State and shift registers
     // =========================================================================
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state   <= IDLE;
-            bit_cnt <= 7'd0;
+            state      <= IDLE;
+            bit_cnt    <= 7'd0;
+            id_latch   <= 11'd0;
+            dlc_latch  <= 4'd0;
+            data_bits  <= 6'd0;
+            arb_shift  <= 12'd0;
+            ctrl_shift <= 6'd0;
+            arb_lost   <= 1'b0;
         end else if (clear) begin
-            state   <= IDLE;
-            bit_cnt <= 7'd0;
+            state      <= IDLE;
+            bit_cnt    <= 7'd0;
+            id_latch   <= 11'd0;
+            dlc_latch  <= 4'd0;
+            data_bits  <= 6'd0;
+            arb_shift  <= 12'd0;
+            ctrl_shift <= 6'd0;
+            arb_lost   <= 1'b0;
         end else begin
             state <= next_state;
 
-            // Bit counter: reset to 0 on state change, increment each tick
+            // Bit counter: reset to 0 on state change, increment each protocol tick
             if (next_state != state)
                 bit_cnt <= 7'd0;
-            else if (bit_tick)
+            else if (proto_tick)
                 bit_cnt <= bit_cnt + 7'd1;
-        end
-    end
 
-    // Latch DLC when entering SOF so DATA length is fixed for the frame
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            dlc_latch <= 4'd0;
-            data_bits <= 6'd0;
-        end else if (state == IDLE && next_state == SOF) begin
-            dlc_latch <= tx_dlc;
-            data_bits <= {2'b00, tx_dlc} << 3;   // dlc * 8, max 64
+            // Latch frame parameters and initialize shift registers when entering SOF
+            if ((state == IDLE && next_state == SOF) || (state == IFS && next_state == SOF)) begin
+                id_latch   <= tx_id;
+                dlc_latch  <= tx_dlc;
+                data_bits  <= {3'b000, tx_dlc} << 3;   // dlc * 8, max 64
+                arb_shift  <= {tx_id, 1'b0};          // RTR = 0 (data frame)
+                ctrl_shift <= {1'b0, 1'b0, tx_dlc};   // IDE = 0, r0 = 0
+                arb_lost   <= 1'b0;
+            end
+
+            // Advance ARBITRATION shift register on each consumed protocol bit
+            if (state == ARBITRATION && proto_tick) begin
+                arb_shift <= {arb_shift[10:0], 1'b1};
+            end
+
+            // Advance CONTROL shift register on each consumed protocol bit
+            if (state == CONTROL && proto_tick) begin
+                ctrl_shift <= {ctrl_shift[4:0], 1'b1};
+            end
+
+            // Lost arbitration detection:
+            // During ARBITRATION at sample_point, if this node drives recessive (1)
+            // but the bus is sampled dominant (0), another node with higher priority won.
+            if (state == ARBITRATION && sample_point && tx_en && !arb_lost) begin
+                if (tx_bit == 1'b1 && rx_bit == 1'b0) begin
+                    arb_lost <= 1'b1;
+                end
+            end
         end
     end
 
@@ -160,7 +231,6 @@ module can_bsp (
                 // Enter SOF when:
                 //   TX path : host requests a frame (tx_request)
                 //   RX path : a dominant SOF bit is seen on the bus
-                // TODO: add lost-arbitration handling once TX is implemented.
                 if (tx_request || (!rx_bit && sample_point))
                     next_state = SOF;
             end
@@ -168,37 +238,34 @@ module can_bsp (
             // ------------------------------------------------------------------
             SOF: begin
                 // 1 bit; move to ARBITRATION after it has been sent/sampled
-                if (bit_tick && bit_cnt >= (LEN_SOF - 1))
+                if (proto_tick && bit_cnt >= (LEN_SOF - 1))
                     next_state = ARBITRATION;
             end
 
             // ------------------------------------------------------------------
             ARBITRATION: begin
-                // 12 bits (11-bit ID + RTR)
-                // TODO: lost arbitration check -- if tx_en and rx_bit != tx_bit
-                //       at sample point, switch to RX-only and stay in ARBITRATION.
-                if (bit_tick && bit_cnt >= (LEN_ARB - 1))
+                // 12 protocol bits (11-bit ID + RTR)
+                if (proto_tick && bit_cnt >= (LEN_ARB - 1))
                     next_state = CONTROL;
             end
 
             // ------------------------------------------------------------------
             CONTROL: begin
-                // 6 bits (IDE + r0 + DLC)
-                if (bit_tick && bit_cnt >= (LEN_CTRL - 1))
+                // 6 protocol bits (IDE + r0 + DLC)
+                if (proto_tick && bit_cnt >= (LEN_CTRL - 1))
                     next_state = (dlc_latch == 4'd0) ? CRC_FIELD : DATA;
             end
 
             // ------------------------------------------------------------------
             DATA: begin
                 // dlc_latch * 8 bits (0..64); data_bits was captured at SOF
-                if (bit_tick && {1'b0, bit_cnt} >= (data_bits - 6'd1))
+                if (proto_tick && bit_cnt >= (data_bits - 7'd1))
                     next_state = CRC_FIELD;
             end
 
             // ------------------------------------------------------------------
             CRC_FIELD: begin
                 // 15 CRC bits + 1 delimiter = 16 bits
-                // TODO: check crc_ok at the delimiter sample point (RX path).
                 if (bit_tick && bit_cnt >= (LEN_CRC - 1))
                     next_state = ACK;
             end
@@ -206,8 +273,6 @@ module can_bsp (
             // ------------------------------------------------------------------
             ACK: begin
                 // 2 bits: ACK slot + ACK delimiter
-                // TODO: TX node checks that rx_bit is dominant in slot (bit 0).
-                //       RX node drives dominant in slot.
                 if (bit_tick && bit_cnt >= (LEN_ACK - 1))
                     next_state = EOF;
             end
@@ -215,7 +280,6 @@ module can_bsp (
             // ------------------------------------------------------------------
             EOF: begin
                 // 7 recessive bits
-                // TODO: form error if a dominant bit is detected here.
                 if (bit_tick && bit_cnt >= (LEN_EOF - 1))
                     next_state = IFS;
             end
@@ -230,8 +294,6 @@ module can_bsp (
             // ------------------------------------------------------------------
             ERROR_FRAME: begin
                 // 6 dominant error flag + 8 recessive delimiter = 14 bits
-                // TODO: implement error-active vs error-passive flag lengths
-                //       once the Error Management Logic (EML) is in place.
                 if (bit_tick && bit_cnt >= (LEN_ERR - 1))
                     next_state = IFS;
             end
@@ -262,25 +324,31 @@ module can_bsp (
     assign error_out = (next_state == ERROR_FRAME) && (state != ERROR_FRAME);
 
     // ------------------------------------------------------------------
-    // TX driver stub
-    // TODO: replace with proper TX serialiser hooks once each field's
-    //       bit-generation logic is implemented.
+    // Un-stuffed protocol bit multiplexer
     // ------------------------------------------------------------------
     always_comb begin
-        tx_bit = 1'b1;    // recessive (safe default)
-        tx_en  = 1'b0;
-
         case (state)
-            SOF:         begin tx_bit = 1'b0; tx_en = 1'b1; end  // dominant SOF
-            ARBITRATION: begin tx_bit = 1'b1; tx_en = 1'b1; end  // TODO: shift tx_id
-            CONTROL:     begin tx_bit = 1'b1; tx_en = 1'b1; end  // TODO: shift control field
-            DATA:        begin tx_bit = 1'b1; tx_en = 1'b1; end  // TODO: shift data bytes
-            CRC_FIELD:   begin tx_bit = 1'b1; tx_en = 1'b1; end  // TODO: shift CRC sequence
-            ACK:         begin tx_bit = 1'b1; tx_en = 1'b0; end  // TX releases; RX pulls dominant
-            EOF:         begin tx_bit = 1'b1; tx_en = 1'b1; end  // 7 recessive
-            ERROR_FRAME: begin tx_bit = 1'b0; tx_en = 1'b1; end  // 6 dominant error flag
-            default:     begin tx_bit = 1'b1; tx_en = 1'b0; end  // idle / IFS
+            SOF:         raw_tx_bit = 1'b0;            // dominant SOF
+            ARBITRATION: raw_tx_bit = arb_shift[11];   // 11-bit ID + RTR (MSB first)
+            CONTROL:     raw_tx_bit = ctrl_shift[5];   // IDE(0) + r0(0) + DLC[3:0] (MSB first)
+            DATA:        raw_tx_bit = 1'b1;            // TODO: shift data bytes
+            CRC_FIELD:   raw_tx_bit = 1'b1;            // TODO: shift CRC sequence
+            ACK:         raw_tx_bit = 1'b1;            // TX releases; RX pulls dominant
+            EOF:         raw_tx_bit = 1'b1;            // 7 recessive
+            ERROR_FRAME: raw_tx_bit = 1'b0;            // 6 dominant error flag
+            default:     raw_tx_bit = 1'b1;            // idle / IFS recessive
         endcase
     end
+
+    // Actual bus bit driven is the output of the bit stuffer
+    assign tx_bit = stuffer_bit_out;
+
+    // Bus drive enable:
+    // When ERROR_FRAME, actively drive error flag.
+    // When transmitting standard frame fields, drive as long as arbitration is not lost.
+    assign tx_en = (state == ERROR_FRAME) ? 1'b1 :
+                   (!arb_lost && (state == SOF || state == ARBITRATION ||
+                                  state == CONTROL || state == DATA ||
+                                  state == CRC_FIELD || state == EOF));
 
 endmodule
