@@ -1,0 +1,8 @@
+0.7
+2020.2
+Oct 13 2023
+20:47:58
+E:/MajorProject/can_bsp/can_bsp.sim/sim_1/behav/xsim/glbl.v,1697210495,verilog,,,,glbl,,uvm,,,,,,
+E:/MajorProject/can_bsp/can_bsp.srcs/sim_1/imports/new/tb_can_bsp.sv,1792834489,systemVerilog,,,,tb_can_bsp,,uvm,,,,,,
+E:/MajorProject/can_bsp/can_bsp.srcs/sources_1/imports/new/can_bit_stuffer.sv,1791013862,systemVerilog,,E:/MajorProject/can_bsp/can_bsp.srcs/sources_1/imports/new/can_bsp.sv,,can_bit_stuffer,,uvm,,,,,,
+E:/MajorProject/can_bsp/can_bsp.srcs/sources_1/imports/new/can_bsp.sv,1792834706,systemVerilog,,E:/MajorProject/can_bsp/can_bsp.srcs/sim_1/imports/new/tb_can_bsp.sv,,can_bsp,,uvm,,,,,,
