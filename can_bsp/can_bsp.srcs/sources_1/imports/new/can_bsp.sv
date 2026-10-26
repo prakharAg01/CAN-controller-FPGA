@@ -1,12 +1,16 @@
 //=============================================================================
-// Module      : can_bsp   (Bus Synchronisation Protocol -- FSM skeleton)
+// Module      : can_bsp   (Bus Synchronisation Protocol -- Phase 1 complete)
 // Description : Frame-level FSM for a Classical CAN 2.0A controller
 //               (standard frames only, 11-bit base ID).
 //
-// This is an intentional SKELETON. States and transitions are fully wired;
-// the per-field bit-level logic (TX serialisation, CRC feed, stuffing hooks,
-// ACK check, error classification) is left as clearly marked TODO stubs so
-// that each piece can be added and tested independently.
+// Implementation status (Days 10-16):
+//   DONE : SOF, ARBITRATION, CONTROL -- TX serialisation + bit stuffing + arb
+//   DONE : DATA field -- TX serialisation from data_shift, stuffing enabled
+//   DONE : CRC_FIELD  -- transmits 15-bit CRC-15 sequence + 1-bit delimiter
+//                        (CRC computed over SOF..DATA using can_crc module)
+//   STUB : ACK (releases bus; RX pulls dominant -- ACK detection Day 17)
+//   STUB : EOF, IFS (counted, no per-bit logic needed for TX)
+//   STUB : ERROR_FRAME (counted)
 //
 // State encoding:
 //   IDLE        - bus idle, waiting for SOF or tx_request
@@ -19,6 +23,11 @@
 //   EOF         - 7 recessive bits
 //   IFS         - interframe space: 3 recessive bits
 //   ERROR_FRAME - 6 dominant error flag + up to 8 recessive delimiter bits
+//
+// CRC coverage (per CAN 2.0A spec):
+//   Calculated over: SOF, ARBITRATION, CONTROL, DATA (de-stuffed protocol bits).
+//   The CRC sequence itself is transmitted without stuffing.
+//   The CRC delimiter is always recessive.
 //
 // Field-length constants (bit counts, 1-based):
 //   SOF        : 1
@@ -40,6 +49,7 @@
 //   tx_request         - host requests a transmission
 //   tx_id [10:0]       - identifier to transmit (latched at SOF)
 //   tx_dlc [3:0]       - data length code (0..8, latched at SOF)
+//   tx_data [63:0]     - data bytes to transmit (latched at SOF, byte 0 in [63:56])
 //   stuff_error        - bit-stuffing violation detected (from destuffer)
 //   crc_ok             - CRC match on received frame (from CRC checker)
 //
@@ -47,8 +57,8 @@
 //   tx_bit             - bit this node places on the bus
 //   tx_en              - 1 = this node is actively driving the bus
 //   frame_active       - 1 while a frame is in progress (not IDLE/IFS)
-//   error_out          - 1-clk pulse when an error is detected
-//   state_out [3:0]    - current state (numeric), for debug / integration
+//   error_out          - 1-clk error pulse
+//   state_out [3:0]    - numeric state for debug
 //=============================================================================
 
 module can_bsp (
@@ -65,6 +75,7 @@ module can_bsp (
     input  logic        tx_request,  // host has a frame ready to send
     input  logic [10:0] tx_id,       // frame identifier
     input  logic [3:0]  tx_dlc,      // data length code (0..8)
+    input  logic [63:0] tx_data,     // data bytes (byte 0 in [63:56], MSB sent first)
 
     // Error inputs
     input  logic        stuff_error, // stuffing violation from destuffer
@@ -97,10 +108,9 @@ module can_bsp (
     bsp_state_t state, next_state;
 
     // =========================================================================
-    // =========================================================================
     // Internal registers
     // =========================================================================
-    logic [6:0]  bit_cnt;      // counts protocol bits elapsed within the current state
+    logic [6:0]  bit_cnt;      // protocol bits elapsed within the current state
     logic [10:0] id_latch;     // latched tx_id at SOF
     logic [3:0]  dlc_latch;    // DLC captured at the start of a frame
     logic [6:0]  data_bits;    // total data-field bits = dlc_latch * 8 (0..64)
@@ -108,8 +118,13 @@ module can_bsp (
     // TX shift registers & arbitration
     logic [11:0] arb_shift;    // {id_latch[10:0], RTR}, shifts MSB first
     logic [5:0]  ctrl_shift;   // {IDE, r0, dlc_latch[3:0]}, shifts MSB first
+    logic [63:0] data_shift;   // tx_data bytes, shifts MSB first during DATA
     logic        raw_tx_bit;   // un-stuffed protocol bit before the stuffer
     logic        arb_lost;     // 1 = lost arbitration during ARBITRATION
+
+    // CRC_FIELD serialization
+    logic [14:0] crc_shift;    // CRC-15 sequence latch, shifts MSB first
+    logic        crc_latched;  // 1 = crc_shift has been loaded for this CRC_FIELD
 
     // Bit stuffer interface wires
     logic        stuff_en;
@@ -118,6 +133,11 @@ module can_bsp (
     logic        stuffer_bit_out_valid;
     logic        stuff_pending;
     logic        stuffing_active;
+
+    // CRC module wires
+    logic        crc_init_p;    // synchronous init pulse to can_crc
+    logic        crc_calc_en;   // feed raw_tx_bit to CRC on each protocol bit
+    logic [14:0] crc_computed;  // running/final CRC-15 value from can_crc
 
     // =========================================================================
     // Field-length parameters (protocol bits)
@@ -133,12 +153,14 @@ module can_bsp (
 
     // =========================================================================
     // Bit stuffer instantiation
-    // Active during SOF, ARBITRATION, and CONTROL (DATA and CRC will be enabled when implemented)
+    // Active during SOF, ARBITRATION, CONTROL, and DATA.
+    // CRC_FIELD: no stuffing (per CAN 2.0A, stuffing ends after the data field).
     // =========================================================================
-    assign stuff_en = (state == SOF) || (state == ARBITRATION) || (state == CONTROL);
+    assign stuff_en = (state == SOF) || (state == ARBITRATION) ||
+                      (state == CONTROL) || (state == DATA);
 
-    // Protocol tick: strobe when a real protocol bit is consumed by stuffer.
-    // When stuffing is disabled (or idle/delimiters), it matches bit_tick.
+    // Protocol tick: strobe when a real protocol bit is consumed by the stuffer.
+    // When stuffing is disabled (CRC_FIELD, ACK, EOF, IFS), matches bit_tick.
     wire proto_tick = stuff_en ? stuffer_ready : bit_tick;
 
     can_bit_stuffer u_stuffer (
@@ -157,27 +179,59 @@ module can_bsp (
     );
 
     // =========================================================================
+    // CRC module instantiation
+    // Calculates CRC-15/CAN over SOF, ARBITRATION, CONTROL, DATA fields.
+    // Initialised when the FSM transitions from IDLE or IFS to SOF.
+    // =========================================================================
+    // Init pulse: fires on the clock edge that moves us into SOF.
+    assign crc_init_p  = (state == IDLE && next_state == SOF) ||
+                         (state == IFS  && next_state == SOF);
+
+    // calc_en: assert on every protocol tick (unstuffed bit) in the CRC coverage area.
+    // raw_tx_bit is used so that stuff bits are NOT fed into the CRC.
+    assign crc_calc_en = proto_tick &&
+                         (state == SOF        ||
+                          state == ARBITRATION ||
+                          state == CONTROL     ||
+                          state == DATA);
+
+    can_crc u_crc (
+        .clk     (clk),
+        .rst_n   (rst_n),
+        .init    (crc_init_p),
+        .calc_en (crc_calc_en),
+        .bit_in  (raw_tx_bit),
+        .crc_out (crc_computed)
+    );
+
+    // =========================================================================
     // State and shift registers
     // =========================================================================
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state      <= IDLE;
-            bit_cnt    <= 7'd0;
-            id_latch   <= 11'd0;
-            dlc_latch  <= 4'd0;
-            data_bits  <= 6'd0;
-            arb_shift  <= 12'd0;
-            ctrl_shift <= 6'd0;
-            arb_lost   <= 1'b0;
+            state       <= IDLE;
+            bit_cnt     <= 7'd0;
+            id_latch    <= 11'd0;
+            dlc_latch   <= 4'd0;
+            data_bits   <= 7'd0;
+            arb_shift   <= 12'd0;
+            ctrl_shift  <= 6'd0;
+            data_shift  <= 64'd0;
+            crc_shift   <= 15'd0;
+            crc_latched <= 1'b0;
+            arb_lost    <= 1'b0;
         end else if (clear) begin
-            state      <= IDLE;
-            bit_cnt    <= 7'd0;
-            id_latch   <= 11'd0;
-            dlc_latch  <= 4'd0;
-            data_bits  <= 6'd0;
-            arb_shift  <= 12'd0;
-            ctrl_shift <= 6'd0;
-            arb_lost   <= 1'b0;
+            state       <= IDLE;
+            bit_cnt     <= 7'd0;
+            id_latch    <= 11'd0;
+            dlc_latch   <= 4'd0;
+            data_bits   <= 7'd0;
+            arb_shift   <= 12'd0;
+            ctrl_shift  <= 6'd0;
+            data_shift  <= 64'd0;
+            crc_shift   <= 15'd0;
+            crc_latched <= 1'b0;
+            arb_lost    <= 1'b0;
         end else begin
             state <= next_state;
 
@@ -187,29 +241,70 @@ module can_bsp (
             else if (proto_tick)
                 bit_cnt <= bit_cnt + 7'd1;
 
-            // Latch frame parameters and initialize shift registers when entering SOF
-            if ((state == IDLE && next_state == SOF) || (state == IFS && next_state == SOF)) begin
-                id_latch   <= tx_id;
-                dlc_latch  <= tx_dlc;
-                data_bits  <= {3'b000, tx_dlc} << 3;   // dlc * 8, max 64
-                arb_shift  <= {tx_id, 1'b0};          // RTR = 0 (data frame)
-                ctrl_shift <= {1'b0, 1'b0, tx_dlc};   // IDE = 0, r0 = 0
-                arb_lost   <= 1'b0;
+            // -----------------------------------------------------------------
+            // Latch frame parameters and initialise shift registers at SOF entry
+            // -----------------------------------------------------------------
+            if ((state == IDLE && next_state == SOF) ||
+                (state == IFS  && next_state == SOF)) begin
+                id_latch    <= tx_id;
+                dlc_latch   <= tx_dlc;
+                data_bits   <= {3'b000, tx_dlc} << 3;  // dlc * 8, max 64
+                arb_shift   <= {tx_id, 1'b0};           // RTR = 0 (data frame)
+                ctrl_shift  <= {1'b0, 1'b0, tx_dlc};   // IDE = 0, r0 = 0
+                data_shift  <= tx_data;                  // capture host data bytes
+                crc_latched <= 1'b0;
+                arb_lost    <= 1'b0;
             end
 
+            // -----------------------------------------------------------------
             // Advance ARBITRATION shift register on each consumed protocol bit
+            // -----------------------------------------------------------------
             if (state == ARBITRATION && proto_tick) begin
                 arb_shift <= {arb_shift[10:0], 1'b1};
             end
 
+            // -----------------------------------------------------------------
             // Advance CONTROL shift register on each consumed protocol bit
+            // -----------------------------------------------------------------
             if (state == CONTROL && proto_tick) begin
                 ctrl_shift <= {ctrl_shift[4:0], 1'b1};
             end
 
+            // -----------------------------------------------------------------
+            // Advance DATA shift register on each consumed protocol bit
+            // -----------------------------------------------------------------
+            if (state == DATA && proto_tick) begin
+                data_shift <= {data_shift[62:0], 1'b1};  // shift MSB out; fill LSB with 1
+            end
+
+            // -----------------------------------------------------------------
+            // CRC shift register:
+            //   Latch crc_computed on the first clock cycle after entering
+            //   CRC_FIELD.  At that point can_crc has already committed the
+            //   final update (from the last DATA / CONTROL proto_tick) because
+            //   both always_ff blocks resolve on the same posedge -- the
+            //   crc_computed value read here is the value BEFORE this cycle's
+            //   update, but the transition to CRC_FIELD happens because the
+            //   last data proto_tick fired on the PREVIOUS posedge, so
+            //   crc_computed is already up to date when we read it here.
+            //   Then shift MSB-first on each bit_tick (bits 0..14); bit 15
+            //   is the recessive delimiter driven from raw_tx_bit directly.
+            // -----------------------------------------------------------------
+            if (state == CRC_FIELD && !crc_latched) begin
+                crc_shift   <= crc_computed;
+                crc_latched <= 1'b1;
+            end
+
+            if (state == CRC_FIELD && bit_tick && crc_latched && bit_cnt < 7'd15) begin
+                crc_shift <= {crc_shift[13:0], 1'b1};
+            end
+
+            // -----------------------------------------------------------------
             // Lost arbitration detection:
-            // During ARBITRATION at sample_point, if this node drives recessive (1)
-            // but the bus is sampled dominant (0), another node with higher priority won.
+            // During ARBITRATION at sample_point, if this node drives recessive
+            // (1) but the bus is sampled dominant (0), another node with higher
+            // priority won.
+            // -----------------------------------------------------------------
             if (state == ARBITRATION && sample_point && tx_en && !arb_lost) begin
                 if (tx_bit == 1'b1 && rx_bit == 1'b0) begin
                     arb_lost <= 1'b1;
@@ -228,9 +323,6 @@ module can_bsp (
 
             // ------------------------------------------------------------------
             IDLE: begin
-                // Enter SOF when:
-                //   TX path : host requests a frame (tx_request)
-                //   RX path : a dominant SOF bit is seen on the bus
                 if (tx_request || (!rx_bit && sample_point))
                     next_state = SOF;
             end
@@ -265,7 +357,7 @@ module can_bsp (
 
             // ------------------------------------------------------------------
             CRC_FIELD: begin
-                // 15 CRC bits + 1 delimiter = 16 bits
+                // 15 CRC bits + 1 delimiter = 16 bits (no stuffing, uses bit_tick)
                 if (bit_tick && bit_cnt >= (LEN_CRC - 1))
                     next_state = ACK;
             end
@@ -306,7 +398,9 @@ module can_bsp (
         // Error override: any error input forces ERROR_FRAME immediately.
         // Checked after the case so it takes priority over all normal transitions.
         // ----------------------------------------------------------------------
-        if (stuff_error || (!crc_ok && state == CRC_FIELD && bit_tick && bit_cnt >= (LEN_CRC - 1)))
+        if (stuff_error ||
+            (!crc_ok && state == CRC_FIELD &&
+             bit_tick && bit_cnt >= (LEN_CRC - 1)))
             next_state = ERROR_FRAME;
     end
 
@@ -314,7 +408,6 @@ module can_bsp (
     // Output logic
     // =========================================================================
 
-    // State output for debug / integration
     assign state_out = state;
 
     // Frame active while not in IDLE or IFS
@@ -328,15 +421,17 @@ module can_bsp (
     // ------------------------------------------------------------------
     always_comb begin
         case (state)
-            SOF:         raw_tx_bit = 1'b0;            // dominant SOF
-            ARBITRATION: raw_tx_bit = arb_shift[11];   // 11-bit ID + RTR (MSB first)
-            CONTROL:     raw_tx_bit = ctrl_shift[5];   // IDE(0) + r0(0) + DLC[3:0] (MSB first)
-            DATA:        raw_tx_bit = 1'b1;            // TODO: shift data bytes
-            CRC_FIELD:   raw_tx_bit = 1'b1;            // TODO: shift CRC sequence
-            ACK:         raw_tx_bit = 1'b1;            // TX releases; RX pulls dominant
-            EOF:         raw_tx_bit = 1'b1;            // 7 recessive
-            ERROR_FRAME: raw_tx_bit = 1'b0;            // 6 dominant error flag
-            default:     raw_tx_bit = 1'b1;            // idle / IFS recessive
+            SOF:         raw_tx_bit = 1'b0;              // dominant SOF
+            ARBITRATION: raw_tx_bit = arb_shift[11];     // 11-bit ID + RTR (MSB first)
+            CONTROL:     raw_tx_bit = ctrl_shift[5];     // IDE(0)+r0(0)+DLC[3:0] (MSB first)
+            DATA:        raw_tx_bit = data_shift[63];    // data bytes, MSB first
+            CRC_FIELD:   raw_tx_bit = (bit_cnt < 7'd15) // 15 CRC bits then delimiter
+                                      ? crc_shift[14]
+                                      : 1'b1;
+            ACK:         raw_tx_bit = 1'b1;              // TX releases; RX pulls dominant
+            EOF:         raw_tx_bit = 1'b1;              // 7 recessive
+            ERROR_FRAME: raw_tx_bit = 1'b0;              // 6 dominant error flag
+            default:     raw_tx_bit = 1'b1;              // idle / IFS recessive
         endcase
     end
 
@@ -347,8 +442,11 @@ module can_bsp (
     // When ERROR_FRAME, actively drive error flag.
     // When transmitting standard frame fields, drive as long as arbitration is not lost.
     assign tx_en = (state == ERROR_FRAME) ? 1'b1 :
-                   (!arb_lost && (state == SOF || state == ARBITRATION ||
-                                  state == CONTROL || state == DATA ||
-                                  state == CRC_FIELD || state == EOF));
+                   (!arb_lost && (state == SOF        ||
+                                  state == ARBITRATION ||
+                                  state == CONTROL     ||
+                                  state == DATA        ||
+                                  state == CRC_FIELD   ||
+                                  state == EOF));
 
 endmodule
