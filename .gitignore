@@ -1,0 +1,49 @@
+# Vivado build artifacts
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+*.srcs/utils_1/
+*.srcs/constrs_1/
+*.xdc
+*.jou
+*.log
+*.str
+*.pb
+*.wdb
+*.xsim.dir/
+
+# Vivado synthesis/implementation outputs
+*.dcp
+*.bit
+*.ltx
+*.bin
+*.mmi
+*.vds
+*.rpt
+*.xml
+
+# Simulation executables and intermediates
+xsim.dir/
+*.exe
+*.obj
+*.rlx
+*.dbg
+*.mem
+*.reloc
+*.rtti
+*.svtype
+*.type
+*.xdbg
+*.sdb
+xsimk.exe
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor backup files
+*.bak
+*~
