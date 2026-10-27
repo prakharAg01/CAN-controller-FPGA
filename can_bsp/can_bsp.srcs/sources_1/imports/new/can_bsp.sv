@@ -3,12 +3,16 @@
 // Description : Frame-level FSM for a Classical CAN 2.0A controller
 //               (standard frames only, 11-bit base ID).
 //
-// Implementation status (Days 10-16):
+// Implementation status (Days 10-17):
 //   DONE : SOF, ARBITRATION, CONTROL -- TX serialisation + bit stuffing + arb
 //   DONE : DATA field -- TX serialisation from data_shift, stuffing enabled
 //   DONE : CRC_FIELD  -- transmits 15-bit CRC-15 sequence + 1-bit delimiter
 //                        (CRC computed over SOF..DATA using can_crc module)
-//   STUB : ACK (releases bus; RX pulls dominant -- ACK detection Day 17)
+//   DONE : ACK        -- Day 17: ACK slot & delimiter handling
+//                        TX: releases bus (recessive), samples rx_bit at sample_point.
+//                            If recessive -> ACK error -> ERROR_FRAME after delimiter.
+//                        RX: drives dominant in ACK slot if crc_ok == 1.
+//                            If crc_ok == 0 -> leaves recessive -> ERROR_FRAME.
 //   STUB : EOF, IFS (counted, no per-bit logic needed for TX)
 //   STUB : ERROR_FRAME (counted)
 //
@@ -57,6 +61,7 @@
 //   tx_bit             - bit this node places on the bus
 //   tx_en              - 1 = this node is actively driving the bus
 //   frame_active       - 1 while a frame is in progress (not IDLE/IFS)
+//   ack_error          - 1 = transmitter detected ACK error in ACK slot
 //   error_out          - 1-clk error pulse
 //   state_out [3:0]    - numeric state for debug
 //=============================================================================
@@ -85,6 +90,7 @@ module can_bsp (
     output logic        tx_bit,      // bit to drive on bus (held between ticks)
     output logic        tx_en,       // 1 = this node drives the bus
     output logic        frame_active,// 1 = frame in progress
+    output logic        ack_error,   // 1 = transmitter detected ACK error in ACK slot
     output logic        error_out,   // 1-clk error pulse
     output logic [3:0]  state_out    // numeric state for debug
 );
@@ -125,6 +131,13 @@ module can_bsp (
     // CRC_FIELD serialization
     logic [14:0] crc_shift;    // CRC-15 sequence latch, shifts MSB first
     logic        crc_latched;  // 1 = crc_shift has been loaded for this CRC_FIELD
+
+    // Mode & ACK tracking (Day 17)
+    logic        transmitting; // 1 = transmitter (tx_request); 0 = receiver / listener
+    logic        ack_received; // 1 = dominant ACK bit sampled in ACK slot
+    logic        ack_err_reg;  // 1 = transmitter sampled recessive in ACK slot
+
+    assign ack_error = ack_err_reg;
 
     // Bit stuffer interface wires
     logic        stuff_en;
@@ -209,29 +222,35 @@ module can_bsp (
     // =========================================================================
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state       <= IDLE;
-            bit_cnt     <= 7'd0;
-            id_latch    <= 11'd0;
-            dlc_latch   <= 4'd0;
-            data_bits   <= 7'd0;
-            arb_shift   <= 12'd0;
-            ctrl_shift  <= 6'd0;
-            data_shift  <= 64'd0;
-            crc_shift   <= 15'd0;
-            crc_latched <= 1'b0;
-            arb_lost    <= 1'b0;
+            state        <= IDLE;
+            bit_cnt      <= 7'd0;
+            id_latch     <= 11'd0;
+            dlc_latch    <= 4'd0;
+            data_bits    <= 7'd0;
+            arb_shift    <= 12'd0;
+            ctrl_shift   <= 6'd0;
+            data_shift   <= 64'd0;
+            crc_shift    <= 15'd0;
+            crc_latched  <= 1'b0;
+            arb_lost     <= 1'b0;
+            transmitting <= 1'b0;
+            ack_received <= 1'b0;
+            ack_err_reg  <= 1'b0;
         end else if (clear) begin
-            state       <= IDLE;
-            bit_cnt     <= 7'd0;
-            id_latch    <= 11'd0;
-            dlc_latch   <= 4'd0;
-            data_bits   <= 7'd0;
-            arb_shift   <= 12'd0;
-            ctrl_shift  <= 6'd0;
-            data_shift  <= 64'd0;
-            crc_shift   <= 15'd0;
-            crc_latched <= 1'b0;
-            arb_lost    <= 1'b0;
+            state        <= IDLE;
+            bit_cnt      <= 7'd0;
+            id_latch     <= 11'd0;
+            dlc_latch    <= 4'd0;
+            data_bits    <= 7'd0;
+            arb_shift    <= 12'd0;
+            ctrl_shift   <= 6'd0;
+            data_shift   <= 64'd0;
+            crc_shift    <= 15'd0;
+            crc_latched  <= 1'b0;
+            arb_lost     <= 1'b0;
+            transmitting <= 1'b0;
+            ack_received <= 1'b0;
+            ack_err_reg  <= 1'b0;
         end else begin
             state <= next_state;
 
@@ -246,14 +265,17 @@ module can_bsp (
             // -----------------------------------------------------------------
             if ((state == IDLE && next_state == SOF) ||
                 (state == IFS  && next_state == SOF)) begin
-                id_latch    <= tx_id;
-                dlc_latch   <= tx_dlc;
-                data_bits   <= {3'b000, tx_dlc} << 3;  // dlc * 8, max 64
-                arb_shift   <= {tx_id, 1'b0};           // RTR = 0 (data frame)
-                ctrl_shift  <= {1'b0, 1'b0, tx_dlc};   // IDE = 0, r0 = 0
-                data_shift  <= tx_data;                  // capture host data bytes
-                crc_latched <= 1'b0;
-                arb_lost    <= 1'b0;
+                id_latch     <= tx_id;
+                dlc_latch    <= tx_dlc;
+                data_bits    <= {3'b000, tx_dlc} << 3;  // dlc * 8, max 64
+                arb_shift    <= {tx_id, 1'b0};           // RTR = 0 (data frame)
+                ctrl_shift   <= {1'b0, 1'b0, tx_dlc};   // IDE = 0, r0 = 0
+                data_shift   <= tx_data;                  // capture host data bytes
+                crc_latched  <= 1'b0;
+                arb_lost     <= 1'b0;
+                transmitting <= tx_request;              // 1 if transmitting, 0 if receiver
+                ack_received <= 1'b0;
+                ack_err_reg  <= 1'b0;
             end
 
             // -----------------------------------------------------------------
@@ -303,11 +325,27 @@ module can_bsp (
             // Lost arbitration detection:
             // During ARBITRATION at sample_point, if this node drives recessive
             // (1) but the bus is sampled dominant (0), another node with higher
-            // priority won.
+            // priority won. Node is demoted to a receiver for the frame remainder.
             // -----------------------------------------------------------------
             if (state == ARBITRATION && sample_point && tx_en && !arb_lost) begin
                 if (tx_bit == 1'b1 && rx_bit == 1'b0) begin
-                    arb_lost <= 1'b1;
+                    arb_lost     <= 1'b1;
+                    transmitting <= 1'b0;
+                end
+            end
+
+            // -----------------------------------------------------------------
+            // ACK slot sampling (transmitter):
+            // At sample_point in bit 0 of ACK, check if a receiver pulled the bus
+            // dominant (rx_bit == 0). If rx_bit == 1, no receiver acknowledged.
+            // -----------------------------------------------------------------
+            if (state == ACK && bit_cnt == 7'd0 && sample_point && transmitting) begin
+                if (rx_bit == 1'b0) begin
+                    ack_received <= 1'b1;
+                    ack_err_reg  <= 1'b0;
+                end else begin
+                    ack_received <= 1'b0;
+                    ack_err_reg  <= 1'b1;
                 end
             end
         end
@@ -365,8 +403,14 @@ module can_bsp (
             // ------------------------------------------------------------------
             ACK: begin
                 // 2 bits: ACK slot + ACK delimiter
-                if (bit_tick && bit_cnt >= (LEN_ACK - 1))
-                    next_state = EOF;
+                if (bit_tick && bit_cnt >= (LEN_ACK - 1)) begin
+                    if (transmitting && ack_err_reg)
+                        next_state = ERROR_FRAME;
+                    else if (!transmitting && !crc_ok)
+                        next_state = ERROR_FRAME;
+                    else
+                        next_state = EOF;
+                end
             end
 
             // ------------------------------------------------------------------
@@ -398,9 +442,7 @@ module can_bsp (
         // Error override: any error input forces ERROR_FRAME immediately.
         // Checked after the case so it takes priority over all normal transitions.
         // ----------------------------------------------------------------------
-        if (stuff_error ||
-            (!crc_ok && state == CRC_FIELD &&
-             bit_tick && bit_cnt >= (LEN_CRC - 1)))
+        if (stuff_error)
             next_state = ERROR_FRAME;
     end
 
@@ -428,25 +470,31 @@ module can_bsp (
             CRC_FIELD:   raw_tx_bit = (bit_cnt < 7'd15) // 15 CRC bits then delimiter
                                       ? crc_shift[14]
                                       : 1'b1;
-            ACK:         raw_tx_bit = 1'b1;              // TX releases; RX pulls dominant
+            ACK:         raw_tx_bit = (!transmitting && (bit_cnt == 7'd0) && crc_ok)
+                                      ? 1'b0             // RX drives dominant in ACK slot if CRC ok
+                                      : 1'b1;            // TX and delimiter drive recessive
             EOF:         raw_tx_bit = 1'b1;              // 7 recessive
             ERROR_FRAME: raw_tx_bit = 1'b0;              // 6 dominant error flag
             default:     raw_tx_bit = 1'b1;              // idle / IFS recessive
         endcase
     end
 
-    // Actual bus bit driven is the output of the bit stuffer
-    assign tx_bit = stuffer_bit_out;
+    // Actual bus bit driven:
+    // During ACK, bypass stuffer register to keep tx_bit in exact phase with tx_en.
+    // In stuffed protocol states, drive from stuffer.
+    assign tx_bit = (state == ACK) ? raw_tx_bit : stuffer_bit_out;
 
     // Bus drive enable:
     // When ERROR_FRAME, actively drive error flag.
     // When transmitting standard frame fields, drive as long as arbitration is not lost.
+    // When receiver in ACK slot with valid CRC, actively drive dominant ACK bit.
     assign tx_en = (state == ERROR_FRAME) ? 1'b1 :
                    (!arb_lost && (state == SOF        ||
                                   state == ARBITRATION ||
                                   state == CONTROL     ||
                                   state == DATA        ||
                                   state == CRC_FIELD   ||
-                                  state == EOF));
+                                  state == EOF)) ||
+                   (!transmitting && (state == ACK) && (bit_cnt == 7'd0) && crc_ok);
 
 endmodule

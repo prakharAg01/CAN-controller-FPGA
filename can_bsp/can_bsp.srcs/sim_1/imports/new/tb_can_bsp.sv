@@ -22,6 +22,10 @@
 //   T15 - Lost arbitration detection (tx_en disabled on bus collision)
 //   T16 - Dynamic bit stuffing in ARBITRATION (5 identical bits -> stuff bit)
 //   T17 - CRC field bit-by-bit output check for a known frame
+//   T18 - Transmitter ACK success: external dominant pulse in slot -> EOF
+//   T19 - Transmitter ACK error: recessive slot -> ERROR_FRAME after delimiter
+//   T20 - Receiver ACK drive: valid CRC -> drives dominant in ACK slot
+//   T21 - Receiver CRC error: crc_ok=0 -> withholds ACK, enters ERROR_FRAME
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -49,6 +53,7 @@ module tb_can_bsp;
     logic        tx_bit_out;
     logic        tx_en;
     logic        frame_active;
+    logic        ack_error;
     logic        error_out;
     logic [3:0]  state_out;
 
@@ -92,6 +97,7 @@ module tb_can_bsp;
         .tx_bit      (tx_bit_out),
         .tx_en       (tx_en),
         .frame_active(frame_active),
+        .ack_error   (ack_error),
         .error_out   (error_out),
         .state_out   (state_out)
     );
@@ -509,40 +515,24 @@ module tb_can_bsp;
         tx_data    = 64'hA500000000000000;  // byte 0 = 0xA5, rest unused
         tx_request = 1'b1;
 
-        // Build reference CRC over the unstuffed frame bits
+        // Build reference CRC over the unstuffed frame bits:
+        // SOF(0) + ID[10:0] + RTR(0) + IDE(0) + r0(0) + DLC[3:0] + DATA (MSB first)
         ref_crc = 15'h0000;
         // SOF
         ref_crc = crc15_next(ref_crc, 1'b0);
-        // ID 0x1A5 = 0_0011_0101_01 MSB first
-        ref_crc = crc15_next(ref_crc, 1'b0); // ID[10]=0
-        ref_crc = crc15_next(ref_crc, 1'b0); // ID[9]=0
-        ref_crc = crc15_next(ref_crc, 1'b0); // ID[8]=0
-        ref_crc = crc15_next(ref_crc, 1'b1); // ID[7]=1
-        ref_crc = crc15_next(ref_crc, 1'b1); // ID[6]=1
-        ref_crc = crc15_next(ref_crc, 1'b0); // ID[5]=0
-        ref_crc = crc15_next(ref_crc, 1'b1); // ID[4]=1
-        ref_crc = crc15_next(ref_crc, 1'b0); // ID[3]=0
-        ref_crc = crc15_next(ref_crc, 1'b1); // ID[2]=1
-        ref_crc = crc15_next(ref_crc, 1'b0); // ID[1]=0
-        ref_crc = crc15_next(ref_crc, 1'b1); // ID[0]=1
-        // RTR, IDE, r0
+        // ID[10:0] MSB-first
+        for (k = 10; k >= 0; k = k - 1)
+            ref_crc = crc15_next(ref_crc, tx_id[k]);
+        // RTR, IDE, r0 (all 0 for standard data frame)
         ref_crc = crc15_next(ref_crc, 1'b0);
         ref_crc = crc15_next(ref_crc, 1'b0);
         ref_crc = crc15_next(ref_crc, 1'b0);
-        // DLC = 0001
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b1);
-        // DATA byte 0 = 0xA5 = 1010_0101 (MSB first)
-        ref_crc = crc15_next(ref_crc, 1'b1);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b1);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b1);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b1);
+        // DLC[3:0] MSB-first
+        for (k = 3; k >= 0; k = k - 1)
+            ref_crc = crc15_next(ref_crc, tx_dlc[k]);
+        // DATA byte 0 (tx_data[63:56]) MSB-first
+        for (k = 63; k >= 56; k = k - 1)
+            ref_crc = crc15_next(ref_crc, tx_data[k]);
 
         $display("T17  reference CRC-15 = 0x%04h (%015b)", ref_crc, ref_crc);
 
@@ -604,6 +594,191 @@ module tb_can_bsp;
         tx_request = 1'b0;
         tick_n(3);
         check_state("T17-end  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T18 -- Transmitter ACK Success:
+        // External receiver pulls bus dominant (rx_bit=0) during ACK slot.
+        // Node verifies:
+        //   - tx_bit_out=1 (releases bus), tx_en=0 (does not drive dominant)
+        //   - sample_point samples rx_bit=0 -> ack_error=0
+        //   - ACK delimiter is recessive
+        //   - 2nd tick transitions to EOF (not ERROR_FRAME)
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);          // -> SOF
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        tick_n(15); tick();      // 16 ticks in CRC_FIELD -> enters ACK
+        check_state("T18-enter  entered ACK state", ST_ACK);
+
+        // Bit 0: ACK Slot
+        // Transmitter must release the bus (recessive 1, tx_en 0)
+        check_bit("T18-slot  TX releases bus during ACK slot", 1'b1, 1'b0);
+        // External receiver pulls bus dominant
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        @(negedge clk);
+        tests = tests + 1;
+        if (ack_error !== 1'b0) begin
+            $display("[FAIL] T18-ack_ok  expected ack_error=0  got=%b", ack_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T18-ack_ok  frame successfully ACKed (ack_error=0)");
+        end
+
+        // 1st tick of ACK consumed -> moves to bit 1 (ACK delimiter)
+        rx_bit = 1'b1;  // bus returns recessive for delimiter
+        tick();
+        check_state("T18-delim  in ACK delimiter (still ACK)", ST_ACK);
+        check_bit("T18-delim_bit  ACK delimiter recessive", 1'b1, 1'b0);
+
+        // 2nd tick of ACK consumed -> successfully transitions to EOF
+        tick();
+        check_state("T18-eof  transitioned to EOF after valid ACK", ST_EOF);
+
+        // Step through EOF (7) and IFS (3) back to IDLE
+        tick_n(6); tick();
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T18-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T19 -- Transmitter ACK Error:
+        // No receiver on bus (rx_bit remains 1'b1 recessive during ACK slot).
+        // Node verifies:
+        //   - sample_point samples rx_bit=1 -> ack_error=1
+        //   - delimiter bit 1 stays in ACK
+        //   - 2nd tick transitions to ERROR_FRAME (not EOF)
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);          // -> SOF
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        tick_n(15); tick();      // -> enters ACK
+        check_state("T19-enter  entered ACK state", ST_ACK);
+
+        // Bit 0: ACK Slot
+        // Bus remains recessive (rx_bit = 1) -> No ACK
+        rx_bit = 1'b1;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        @(negedge clk);
+        tests = tests + 1;
+        if (ack_error !== 1'b1) begin
+            $display("[FAIL] T19-ack_err  expected ack_error=1  got=%b", ack_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T19-ack_err  ACK error detected (ack_error=1)");
+        end
+
+        // 1st tick -> moves to bit 1 (ACK delimiter)
+        tick();
+        check_state("T19-delim  in ACK delimiter (still ACK)", ST_ACK);
+
+        // 2nd tick -> must transition to ERROR_FRAME because of ACK error!
+        tick();
+        check_state("T19-err_frame  ACK error forced ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Clean up: step through ERROR_FRAME (14 ticks) -> IFS (3 ticks) -> IDLE
+        tick_n(13); tick();
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T19-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T20 -- Receiver Role: Valid CRC -> Drives dominant ACK
+        // Node enters SOF from bus activity (tx_request=0, rx_bit=0 at sample_point).
+        // With crc_ok = 1:
+        //   - In ACK slot (bit 0): drives tx_bit_out=0 and tx_en=1!
+        //   - In ACK delimiter (bit 1): releases bus (tx_bit_out=1, tx_en=0)
+        //   - Transitions to EOF
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b0;
+        rx_bit     = 1'b0;   // bus goes dominant in IDLE
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_state("T20-sof  bus dominant -> SOF as receiver", ST_SOF);
+
+        rx_bit = 1'b1;
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        tick_n(15); tick();      // 16 ticks in CRC_FIELD -> enters ACK
+        check_state("T20-enter  receiver entered ACK state", ST_ACK);
+
+        // Bit 0: ACK Slot for Receiver with crc_ok=1
+        // Receiver MUST DRIVE DOMINANT (tx_bit_out=0, tx_en=1)
+        check_bit("T20-rx_ack  receiver drives dominant ACK bit", 1'b0, 1'b1);
+
+        // Bit 1: ACK Delimiter
+        tick();
+        check_state("T20-delim  receiver in ACK delimiter", ST_ACK);
+        check_bit("T20-rx_delim  receiver releases bus for delimiter", 1'b1, 1'b0);
+
+        // After delimiter: transitions to EOF
+        tick();
+        check_state("T20-eof  receiver transitions to EOF", ST_EOF);
+
+        // Clean up to IDLE
+        tick_n(6); tick(); tick_n(3);
+        check_state("T20-idle  receiver returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T21 -- Receiver Role: CRC Error (crc_ok=0) -> No ACK + ERROR_FRAME
+        // Node is receiving. crc_ok=0 indicates CRC failure.
+        // Node verifies:
+        //   - In ACK slot: does NOT drive dominant (tx_en=0, tx_bit_out=1)
+        //   - After delimiter: transitions to ERROR_FRAME
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b0;
+        rx_bit     = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_state("T21-sof  entered SOF as receiver", ST_SOF);
+
+        rx_bit = 1'b1;
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        crc_ok = 1'b0;           // CRC checker reports CRC MISMATCH!
+        tick_n(15); tick();      // -> enters ACK
+        check_state("T21-enter  entered ACK with crc_ok=0", ST_ACK);
+
+        // Bit 0: ACK Slot with CRC error
+        // Receiver must NOT drive dominant
+        check_bit("T21-no_ack  receiver withholds ACK (tx_en=0)", 1'b1, 1'b0);
+
+        // Bit 1: Delimiter
+        tick();
+        check_state("T21-delim  in ACK delimiter", ST_ACK);
+
+        // After delimiter: must transition to ERROR_FRAME due to CRC error!
+        tick();
+        check_state("T21-err_frame  CRC error forces ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Clean up
+        crc_ok = 1'b1;
+        tick_n(13); tick(); tick_n(3);
+        check_state("T21-idle  returned to IDLE", ST_IDLE);
 
         // ==================================================================
         // Summary

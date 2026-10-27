@@ -4,8 +4,9 @@ Time resolution is 1 ps
 [PASS]            T3a  after SOF tick -> ARBITRATION  state=2
 [PASS] T3b  11 ticks in ARBITRATION (still ARBITRATION)  state=2
 [PASS]                     T3c  12th tick -> CONTROL  state=3
-[PASS]       T4a  5 ticks in CONTROL (still CONTROL)  state=3
-[PASS]                         T4b  6th tick -> DATA  state=4
+[PASS] T4a  5 ticks in CONTROL (4 proto + 1 stuff bit)  state=3
+[PASS]        T4b  6th tick DLC[1]=1 (still CONTROL)  state=3
+[PASS]                T4c  7th tick DLC[0]=0 -> DATA  state=4
 [PASS]            T5a  15 ticks in DATA (still DATA)  state=4
 [PASS]                   T5b  16th tick -> CRC_FIELD  state=5
 [PASS]  T6a  15 ticks in CRC_FIELD (still CRC_FIELD)  state=5
@@ -17,14 +18,49 @@ Time resolution is 1 ps
 [PASS]               T9a  2 ticks in IFS (still IFS)  state=8
 [PASS]    T9b  3rd tick -> IDLE (no pending request)  state=0
 [PASS]   T10a  5 ticks CONTROL DLC=0 (still CONTROL)  state=3
-[PASS]     T10b  6th tick CONTROL DLC=0 -> CRC_FIELD  state=5
-[PASS]      T10c  returned to IDLE after DLC=0 frame  state=0
+[PASS]      T10b  6th tick stuff bit (still CONTROL)  state=3
+[PASS]                   T10c  7th tick -> CRC_FIELD  state=5
+[PASS]      T10d  returned to IDLE after DLC=0 frame  state=0
 [PASS]       T11  stuff_error in DATA -> ERROR_FRAME  state=9
 [PASS] T12a  13 ticks in ERROR_FRAME (still ERROR_FRAME)  state=9
 [PASS]                        T12b  14th tick -> IFS  state=8
 [PASS]           T12c  IFS -> IDLE after ERROR_FRAME  state=0
 [PASS]             T13  clear in ARBITRATION -> IDLE  state=0
-----------------------------------------------------
-ALL 25 BSP FSM TESTS PASSED
-----------------------------------------------------
-$finish called at time : 3390 ns : File "C:/Users/prath/can_bsp/can_bsp.srcs/sim_1/new/tb_can_bsp.sv" Line 326
+[PASS]                  T14-init  SOF -> ARBITRATION  state=2
+[PASS]                     T14-0  ARB bit 0 ID[10]=1  bit=1 en=1
+[PASS]                      T14-1  ARB bit 1 ID[9]=0  bit=0 en=1
+[PASS]                      T14-2  ARB bit 2 ID[8]=1  bit=1 en=1
+[PASS]                      T14-3  ARB bit 3 ID[7]=1  bit=1 en=1
+[PASS]                      T14-4  ARB bit 4 ID[6]=0  bit=0 en=1
+[PASS]                      T14-5  ARB bit 5 ID[5]=1  bit=1 en=1
+[PASS]                      T14-6  ARB bit 6 ID[4]=0  bit=0 en=1
+[PASS]                      T14-7  ARB bit 7 ID[3]=0  bit=0 en=1
+[PASS]                      T14-8  ARB bit 8 ID[2]=1  bit=1 en=1
+[PASS]                      T14-9  ARB bit 9 ID[1]=0  bit=0 en=1
+[PASS]                     T14-10 ARB bit 10 ID[0]=1  bit=1 en=1
+[PASS]                       T14-11 ARB bit 11 RTR=0  bit=0 en=1
+[PASS]     T14-arb  12 ARB ticks complete -> CONTROL  state=3
+[PASS]                               T14-ctrl0 IDE=0  bit=0 en=1
+[PASS]                                T14-ctrl1 r0=0  bit=0 en=1
+[PASS]                            T14-ctrl2 DLC[3]=1  bit=1 en=1
+[PASS]                            T14-ctrl3 DLC[2]=0  bit=0 en=1
+[PASS]                            T14-ctrl4 DLC[1]=0  bit=0 en=1
+[PASS]                            T14-ctrl5 DLC[0]=0  bit=0 en=1
+[PASS]        T14-ctrl 6 CTRL ticks complete -> DATA  state=4
+[PASS]                     T14-end  returned to IDLE  state=0
+[PASS]                    T15a  ID[10]=1 driving bus  bit=1 en=1
+[PASS]                T15b  lost arb: tx_en disabled  bit=1 en=0
+[PASS]        T15c  after ARB -> CONTROL as listener  state=3
+[PASS]               T15d  listener returned to IDLE  state=0
+[PASS]                               T16-1  ID[10]=1  bit=1 en=1
+[PASS]                                T16-2  ID[9]=1  bit=1 en=1
+[PASS]                                T16-3  ID[8]=1  bit=1 en=1
+[PASS]                                T16-4  ID[7]=1  bit=1 en=1
+[PASS]                      T16-5  ID[6]=1 (5th one)  bit=1 en=1
+[PASS]        T16-stuff  dominant stuff bit inserted  bit=0 en=1
+[PASS]     T16-hold   stuff bit holds in ARBITRATION  state=2
+[PASS]                                T16-6  ID[5]=0  bit=0 en=1
+[PASS]            T16-end  after 13 ticks -> CONTROL  state=3
+[PASS]                     T16-idle returned to IDLE  state=0
+T17  reference CRC-15 = 0x5617 (101011000010111)
+[PASS]               T17-se

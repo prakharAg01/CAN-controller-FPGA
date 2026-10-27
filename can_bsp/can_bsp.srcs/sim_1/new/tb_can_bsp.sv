@@ -1,28 +1,31 @@
 //=============================================================================
 // Testbench   : tb_can_bsp
-// Description : Self-checking testbench for the can_bsp FSM skeleton.
-//               Verifies state transitions using bit_tick strobes.
-//               Full-frame data correctness (CRC, stuffing, ACK) is NOT
-//               tested here -- those checks belong in the integration
-//               testbench once the per-field logic is filled in.
+// Description : Self-checking testbench for the can_bsp FSM.
+//               Verifies state transitions, TX serialisation, bit stuffing,
+//               lost arbitration, data field output, and CRC field output.
 //
 // Tests:
-//   T1 - Reset -> IDLE
-//   T2 - tx_request -> SOF -> ARBITRATION after 1 bit_tick
-//   T3 - Step through ARBITRATION (12 ticks) -> CONTROL
-//   T4 - Step through CONTROL (6 ticks) -> DATA (DLC = 2, non-zero)
-//   T5 - Step through DATA (16 ticks for DLC=2) -> CRC_FIELD
-//   T6 - Step through CRC_FIELD (16 ticks) -> ACK
-//   T7 - Step through ACK (2 ticks) -> EOF
-//   T8 - Step through EOF (7 ticks) -> IFS
-//   T9 - Step through IFS (3 ticks) -> IDLE (no pending tx_request)
-//   T10- DLC = 0 : CONTROL bit stuffing (7 ticks) -> CRC_FIELD (skip DATA)
-//   T11- stuff_error during DATA -> ERROR_FRAME immediately
-//   T12- ERROR_FRAME steps through 14 ticks -> IFS
-//   T13- clear signal -> IDLE from any state
-//   T14- ARBITRATION & CONTROL bit-by-bit TX serialisation check
-//   T15- Lost arbitration detection (tx_en disabled on bus collision)
-//   T16- Dynamic bit stuffing in ARBITRATION (5 identical bits insert stuff bit)
+//   T1  - Reset -> IDLE
+//   T2  - tx_request -> SOF -> ARBITRATION after 1 bit_tick
+//   T3  - Step through ARBITRATION (12 ticks) -> CONTROL
+//   T4  - Step through CONTROL (7 ticks incl. boundary stuff bit) -> DATA (DLC=2)
+//   T5  - Step through DATA (16 ticks for DLC=2, alternating data) -> CRC_FIELD
+//   T6  - Step through CRC_FIELD (16 ticks) -> ACK
+//   T7  - Step through ACK (2 ticks) -> EOF
+//   T8  - Step through EOF (7 ticks) -> IFS
+//   T9  - Step through IFS (3 ticks) -> IDLE
+//   T10 - DLC=0: CONTROL boundary stuffing (7 ticks) -> CRC_FIELD (skip DATA)
+//   T11 - stuff_error during DATA -> ERROR_FRAME immediately
+//   T12 - ERROR_FRAME: 13 ticks stay; 14th -> IFS
+//   T13 - clear signal -> IDLE from any state
+//   T14 - ARBITRATION & CONTROL bit-by-bit TX serialisation check
+//   T15 - Lost arbitration detection (tx_en disabled on bus collision)
+//   T16 - Dynamic bit stuffing in ARBITRATION (5 identical bits -> stuff bit)
+//   T17 - CRC field bit-by-bit output check for a known frame
+//   T18 - Transmitter ACK success: external dominant pulse in slot -> EOF
+//   T19 - Transmitter ACK error: recessive slot -> ERROR_FRAME after delimiter
+//   T20 - Receiver ACK drive: valid CRC -> drives dominant in ACK slot
+//   T21 - Receiver CRC error: crc_ok=0 -> withholds ACK, enters ERROR_FRAME
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -43,12 +46,14 @@ module tb_can_bsp;
     logic        tx_request;
     logic [10:0] tx_id;
     logic [3:0]  tx_dlc;
+    logic [63:0] tx_data;
     logic        stuff_error;
     logic        crc_ok;
 
     logic        tx_bit_out;
     logic        tx_en;
     logic        frame_active;
+    logic        ack_error;
     logic        error_out;
     logic [3:0]  state_out;
 
@@ -86,11 +91,13 @@ module tb_can_bsp;
         .tx_request  (tx_request),
         .tx_id       (tx_id),
         .tx_dlc      (tx_dlc),
+        .tx_data     (tx_data),
         .stuff_error (stuff_error),
         .crc_ok      (crc_ok),
         .tx_bit      (tx_bit_out),
         .tx_en       (tx_en),
         .frame_active(frame_active),
+        .ack_error   (ack_error),
         .error_out   (error_out),
         .state_out   (state_out)
     );
@@ -158,43 +165,70 @@ module tb_can_bsp;
     endtask
 
     // -------------------------------------------------------------------------
-    // Helper: full reset and default signal values
+    // Reference CRC-15/CAN function (mirrors can_crc polynomial 0x4599)
+    // Feed one de-stuffed bit at a time. Returns updated CRC.
+    // -------------------------------------------------------------------------
+    function automatic logic [14:0] crc15_next(
+        input logic [14:0] crc,
+        input logic        b
+    );
+        logic fb;
+        fb = b ^ crc[14];
+        return ({crc[13:0], 1'b0}) ^ (fb ? 15'h4599 : 15'h0000);
+    endfunction
+
+    // -------------------------------------------------------------------------
+    // Helper: full reset sequence
     // -------------------------------------------------------------------------
     task automatic do_reset;
-        rst_n        = 1'b0;
-        clear        = 1'b0;
-        bit_tick     = 1'b0;
-        sample_point = 1'b0;
-        rx_bit       = 1'b1;   // recessive (bus idle)
-        tx_request   = 1'b0;
-        tx_id        = 11'h000;
-        tx_dlc       = 4'd0;
-        stuff_error  = 1'b0;
-        crc_ok       = 1'b1;
-        repeat (4) @(negedge clk);
+        @(negedge clk);
+        rst_n       = 1'b0;
+        bit_tick    = 1'b0;
+        sample_point= 1'b0;
+        rx_bit      = 1'b1;   // idle bus = recessive
+        tx_request  = 1'b0;
+        clear       = 1'b0;
+        stuff_error = 1'b0;
+        crc_ok      = 1'b1;
+        @(negedge clk);
         rst_n = 1'b1;
         @(negedge clk);
     endtask
 
-    // -------------------------------------------------------------------------
-    // Stimulus
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Main test sequence
+    // =========================================================================
     initial begin
+        logic [14:0] ref_crc;   // software reference CRC accumulator
 
+        // ------ default state -----
+        rst_n       = 1'b1;
+        bit_tick    = 1'b0;
+        sample_point= 1'b0;
+        rx_bit      = 1'b1;
+        tx_request  = 1'b0;
+        tx_id       = 11'h0;
+        tx_dlc      = 4'd0;
+        tx_data     = 64'h0;
+        stuff_error = 1'b0;
+        crc_ok      = 1'b1;
+        clear       = 1'b0;
+
+        // ==================================================================
+        // T1 -- reset -> IDLE
+        // ==================================================================
         do_reset();
-
-        // ==================================================================
-        // T1 -- After reset, FSM must be in IDLE
-        // ==================================================================
         check_state("T1  reset -> IDLE", ST_IDLE);
 
         // ==================================================================
-        // T2 -- tx_request -> SOF on next rising edge
+        // T2 -- tx_request rising edge -> SOF
+        // tx_id = 0x2A5 (010_1010_0101), tx_dlc = 2
+        // tx_data = 0xA5A5_... (alternating bits, no stuff in DATA field)
         // ==================================================================
-        @(negedge clk);
-        tx_request = 1'b1;
         tx_id      = 11'h2A5;
         tx_dlc     = 4'd2;
+        tx_data    = 64'hA5A5A5A5A5A5A5A5; // alternating, no consecutive-5 run
+        tx_request = 1'b1;
         @(negedge clk);
         check_state("T2  tx_request -> SOF", ST_SOF);
 
@@ -230,7 +264,8 @@ module tb_can_bsp;
         check_state("T4c  7th tick DLC[0]=0 -> DATA", ST_DATA);
 
         // ==================================================================
-        // T5 -- DLC=2 -> 16 data bits. 15 ticks stay; 16th -> CRC_FIELD
+        // T5 -- DLC=2 -> 16 data bits of 0xA5A5 (alternating, no stuffing).
+        // 15 ticks stay; 16th -> CRC_FIELD.
         // ==================================================================
         tick_n(15);
         check_state("T5a  15 ticks in DATA (still DATA)", ST_DATA);
@@ -240,6 +275,7 @@ module tb_can_bsp;
 
         // ==================================================================
         // T6 -- 15 ticks stay in CRC_FIELD; 16th -> ACK
+        // (CRC field: 15 CRC bits + 1 delimiter; no stuffing)
         // ==================================================================
         tick_n(15);
         check_state("T6a  15 ticks in CRC_FIELD (still CRC_FIELD)", ST_CRC_FIELD);
@@ -266,8 +302,7 @@ module tb_can_bsp;
         check_state("T8b  7th tick -> IFS", ST_IFS);
 
         // ==================================================================
-        // T9 -- 2 ticks stay in IFS; 3rd -> IDLE (tx_request still high,
-        //        but we lower it first to test the IDLE return path)
+        // T9 -- 2 ticks stay in IFS; 3rd -> IDLE (tx_request lowered first)
         // ==================================================================
         tx_request = 1'b0;
         tick_n(2);
@@ -310,7 +345,7 @@ module tb_can_bsp;
         @(negedge clk);    // -> SOF
         tick();            // -> ARBITRATION
         tick_n(12);        // -> CONTROL
-        tick_n(6);         // -> DATA
+        tick_n(6);         // -> DATA (DLC=8, no boundary stuff for ctrl 1000)
         tick_n(3);         // 3 bits into DATA
 
         @(negedge clk);
@@ -352,18 +387,19 @@ module tb_can_bsp;
         // ==================================================================
         // T14 -- ARBITRATION & CONTROL TX Serialisation bit-by-bit check
         // tx_id = 11'h5A5 (101_1010_0101), tx_dlc = 4'd8 (1000)
-        // Verify tx_bit_out outputs the exact sequence MSB first without
-        // boundary stuff bits.
+        // DLC=8 has no boundary stuffing in CONTROL: {0,0,1,0,0,0} -> max run 3.
         // ==================================================================
         do_reset();
         tx_id      = 11'h5A5;
         tx_dlc     = 4'd8;
+        tx_data    = 64'hA5A5A5A5A5A5A5A5;
         tx_request = 1'b1;
         @(negedge clk);   // -> SOF
         tick();           // SOF tick -> enters ARBITRATION, bus holds SOF (0)
         check_state("T14-init  SOF -> ARBITRATION", ST_ARBITRATION);
 
         // 12 ticks inside ARBITRATION:
+        // 0x5A5 = 101_1010_0101
         tick(); check_bit("T14-0  ARB bit 0 ID[10]=1", 1'b1, 1'b1);
         tick(); check_bit("T14-1  ARB bit 1 ID[9]=0",  1'b0, 1'b1);
         tick(); check_bit("T14-2  ARB bit 2 ID[8]=1",  1'b1, 1'b1);
@@ -387,7 +423,7 @@ module tb_can_bsp;
         tick(); check_bit("T14-ctrl5 DLC[0]=0", 1'b0, 1'b1);
         check_state("T14-ctrl 6 CTRL ticks complete -> DATA", ST_DATA);
 
-        // Clean up to IDLE (DLC=8 -> 64 data bits)
+        // Clean up to IDLE (DLC=8 -> 64 data bits, no stuffing with 0xA5A5...)
         tick_n(64); tick_n(16); tick_n(2); tick_n(7);
         tx_request = 1'b0;
         tick_n(3);
@@ -403,6 +439,7 @@ module tb_can_bsp;
         do_reset();
         tx_id      = 11'h6A5;
         tx_dlc     = 4'd8;
+        tx_data    = 64'hA5A5A5A5A5A5A5A5;
         tx_request = 1'b1;
         @(negedge clk);
         tick(); // -> ARBITRATION
@@ -436,6 +473,7 @@ module tb_can_bsp;
         do_reset();
         tx_id      = 11'h7D5;
         tx_dlc     = 4'd8;
+        tx_data    = 64'hA5A5A5A5A5A5A5A5;
         tx_request = 1'b1;
         @(negedge clk);
         tick(); // SOF -> enters ARBITRATION
@@ -459,6 +497,288 @@ module tb_can_bsp;
         tx_request = 1'b0;
         tick_n(3);
         check_state("T16-idle returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T17 -- CRC field bit-by-bit output check
+        //
+        // Frame: tx_id=0x1A5 (000_1101_0101), tx_dlc=1, tx_data=0xA5 (byte 0).
+        // tx_id=0x1A5 chosen because it has no five-consecutive-same in ARB+CTRL
+        // and no boundary stuff issues with DLC=1 (0001).
+        //
+        // Compute reference CRC over (de-stuffed bits):
+        //   SOF(0) + ID[10:0] + RTR(0) + IDE(0) + r0(0) + DLC(0001) + DATA(0xA5)
+        // Then verify the CRC_FIELD outputs those 15 bits MSB-first + delimiter.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;  // 000_1101_0101 -- no 5-consecutive run
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;  // byte 0 = 0xA5, rest unused
+        tx_request = 1'b1;
+
+        // Build reference CRC over the unstuffed frame bits:
+        // SOF(0) + ID[10:0] + RTR(0) + IDE(0) + r0(0) + DLC[3:0] + DATA (MSB first)
+        ref_crc = 15'h0000;
+        // SOF
+        ref_crc = crc15_next(ref_crc, 1'b0);
+        // ID[10:0] MSB-first
+        for (k = 10; k >= 0; k = k - 1)
+            ref_crc = crc15_next(ref_crc, tx_id[k]);
+        // RTR, IDE, r0 (all 0 for standard data frame)
+        ref_crc = crc15_next(ref_crc, 1'b0);
+        ref_crc = crc15_next(ref_crc, 1'b0);
+        ref_crc = crc15_next(ref_crc, 1'b0);
+        // DLC[3:0] MSB-first
+        for (k = 3; k >= 0; k = k - 1)
+            ref_crc = crc15_next(ref_crc, tx_dlc[k]);
+        // DATA byte 0 (tx_data[63:56]) MSB-first
+        for (k = 63; k >= 56; k = k - 1)
+            ref_crc = crc15_next(ref_crc, tx_data[k]);
+
+        $display("T17  reference CRC-15 = 0x%04h (%015b)", ref_crc, ref_crc);
+
+        // Drive the frame through SOF -> ARBITRATION -> CONTROL -> DATA -> CRC_FIELD
+        @(negedge clk);   // -> SOF
+        tick();           // -> ARBITRATION (no stuffing: SOF=0, first ARB bits are 000...)
+        tick_n(12);       // -> CONTROL (12 arb bits: 000_1101_0101 + RTR=0)
+        // CONTROL for DLC=1 (0001): bits = IDE(0),r0(0),DLC(0001)
+        // Runs: 00 (2) then 0001 -> max run crossing boundary from ARB:
+        // Last ARB bit = RTR=0. CTRL: 0,0,0,0,0,1. Five consecutive zeros -> stuff bit!
+        // Ticks 1-5: first 4 ctrl bits + stuff, tick 6: DLC[0]=1, tick 7: exits to DATA? No.
+        // Wait - actually CTRL = IDE(0), r0(0), DLC[3](0), DLC[2](0), DLC[1](0), DLC[0](1)
+        // Last ARB bit (RTR=0) carries into CTRL run. After the stuff tick (6th), DLC[0]=1 exits CONTROL.
+        // But the transition is after DLC[0], so 7th tick takes us to DATA.
+        tick_n(6);        // 5 ctrl bits (incl. stuff) + DLC[1]=0 (still in CONTROL)
+        tick();           // 7th: DLC[0]=1 -> DATA (DLC=1, 8 bits)
+        check_state("T17-setup  entered DATA (DLC=1)", ST_DATA);
+        tick_n(7);        // 7 data bits (still in DATA)
+        tick();           // 8th data bit -> CRC_FIELD
+        check_state("T17-crc_entry  entered CRC_FIELD", ST_CRC_FIELD);
+
+        // Wait one extra clock for crc_shift to be latched from crc_computed
+        @(negedge clk); @(negedge clk);
+
+        // Now verify each of the 15 CRC bits MSB-first
+        begin : crc_check_loop
+            logic [14:0] expected_shift;
+            int i;
+            expected_shift = ref_crc;
+            for (i = 14; i >= 0; i = i - 1) begin
+                tick();
+                @(negedge clk);
+                tests = tests + 1;
+                if (tx_bit_out !== expected_shift[14]) begin
+                    $display("[FAIL] T17-crc[%0d]  expected=%b  got=%b",
+                             i, expected_shift[14], tx_bit_out);
+                    errors = errors + 1;
+                end else begin
+                    $display("[PASS] T17-crc[%0d]  bit=%b", i, tx_bit_out);
+                end
+                expected_shift = {expected_shift[13:0], 1'b0};
+            end
+        end
+
+        // 16th tick = CRC delimiter (must be recessive = 1'b1)
+        tick();
+        @(negedge clk);
+        tests = tests + 1;
+        if (tx_bit_out !== 1'b1) begin
+            $display("[FAIL] T17-delim  CRC delimiter expected=1  got=%b", tx_bit_out);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T17-delim  CRC delimiter=1");
+        end
+        check_state("T17-ack  after CRC_FIELD -> ACK", ST_ACK);
+
+        // Clean up to IDLE
+        tick_n(2); tick_n(7);
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T17-end  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T18 -- Transmitter ACK Success:
+        // External receiver pulls bus dominant (rx_bit=0) during ACK slot.
+        // Node verifies:
+        //   - tx_bit_out=1 (releases bus), tx_en=0 (does not drive dominant)
+        //   - sample_point samples rx_bit=0 -> ack_error=0
+        //   - ACK delimiter is recessive
+        //   - 2nd tick transitions to EOF (not ERROR_FRAME)
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);          // -> SOF
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        tick_n(15); tick();      // 16 ticks in CRC_FIELD -> enters ACK
+        check_state("T18-enter  entered ACK state", ST_ACK);
+
+        // Bit 0: ACK Slot
+        // Transmitter must release the bus (recessive 1, tx_en 0)
+        check_bit("T18-slot  TX releases bus during ACK slot", 1'b1, 1'b0);
+        // External receiver pulls bus dominant
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        @(negedge clk);
+        tests = tests + 1;
+        if (ack_error !== 1'b0) begin
+            $display("[FAIL] T18-ack_ok  expected ack_error=0  got=%b", ack_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T18-ack_ok  frame successfully ACKed (ack_error=0)");
+        end
+
+        // 1st tick of ACK consumed -> moves to bit 1 (ACK delimiter)
+        rx_bit = 1'b1;  // bus returns recessive for delimiter
+        tick();
+        check_state("T18-delim  in ACK delimiter (still ACK)", ST_ACK);
+        check_bit("T18-delim_bit  ACK delimiter recessive", 1'b1, 1'b0);
+
+        // 2nd tick of ACK consumed -> successfully transitions to EOF
+        tick();
+        check_state("T18-eof  transitioned to EOF after valid ACK", ST_EOF);
+
+        // Step through EOF (7) and IFS (3) back to IDLE
+        tick_n(6); tick();
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T18-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T19 -- Transmitter ACK Error:
+        // No receiver on bus (rx_bit remains 1'b1 recessive during ACK slot).
+        // Node verifies:
+        //   - sample_point samples rx_bit=1 -> ack_error=1
+        //   - delimiter bit 1 stays in ACK
+        //   - 2nd tick transitions to ERROR_FRAME (not EOF)
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);          // -> SOF
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        tick_n(15); tick();      // -> enters ACK
+        check_state("T19-enter  entered ACK state", ST_ACK);
+
+        // Bit 0: ACK Slot
+        // Bus remains recessive (rx_bit = 1) -> No ACK
+        rx_bit = 1'b1;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        @(negedge clk);
+        tests = tests + 1;
+        if (ack_error !== 1'b1) begin
+            $display("[FAIL] T19-ack_err  expected ack_error=1  got=%b", ack_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T19-ack_err  ACK error detected (ack_error=1)");
+        end
+
+        // 1st tick -> moves to bit 1 (ACK delimiter)
+        tick();
+        check_state("T19-delim  in ACK delimiter (still ACK)", ST_ACK);
+
+        // 2nd tick -> must transition to ERROR_FRAME because of ACK error!
+        tick();
+        check_state("T19-err_frame  ACK error forced ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Clean up: step through ERROR_FRAME (14 ticks) -> IFS (3 ticks) -> IDLE
+        tick_n(13); tick();
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T19-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T20 -- Receiver Role: Valid CRC -> Drives dominant ACK
+        // Node enters SOF from bus activity (tx_request=0, rx_bit=0 at sample_point).
+        // With crc_ok = 1:
+        //   - In ACK slot (bit 0): drives tx_bit_out=0 and tx_en=1!
+        //   - In ACK delimiter (bit 1): releases bus (tx_bit_out=1, tx_en=0)
+        //   - Transitions to EOF
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b0;
+        rx_bit     = 1'b0;   // bus goes dominant in IDLE
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_state("T20-sof  bus dominant -> SOF as receiver", ST_SOF);
+
+        rx_bit = 1'b1;
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        tick_n(15); tick();      // 16 ticks in CRC_FIELD -> enters ACK
+        check_state("T20-enter  receiver entered ACK state", ST_ACK);
+
+        // Bit 0: ACK Slot for Receiver with crc_ok=1
+        // Receiver MUST DRIVE DOMINANT (tx_bit_out=0, tx_en=1)
+        check_bit("T20-rx_ack  receiver drives dominant ACK bit", 1'b0, 1'b1);
+
+        // Bit 1: ACK Delimiter
+        tick();
+        check_state("T20-delim  receiver in ACK delimiter", ST_ACK);
+        check_bit("T20-rx_delim  receiver releases bus for delimiter", 1'b1, 1'b0);
+
+        // After delimiter: transitions to EOF
+        tick();
+        check_state("T20-eof  receiver transitions to EOF", ST_EOF);
+
+        // Clean up to IDLE
+        tick_n(6); tick(); tick_n(3);
+        check_state("T20-idle  receiver returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T21 -- Receiver Role: CRC Error (crc_ok=0) -> No ACK + ERROR_FRAME
+        // Node is receiving. crc_ok=0 indicates CRC failure.
+        // Node verifies:
+        //   - In ACK slot: does NOT drive dominant (tx_en=0, tx_bit_out=1)
+        //   - After delimiter: transitions to ERROR_FRAME
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b0;
+        rx_bit     = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_state("T21-sof  entered SOF as receiver", ST_SOF);
+
+        rx_bit = 1'b1;
+        tick();                  // -> ARBITRATION
+        tick_n(12);              // -> CONTROL
+        tick_n(6); tick();       // -> DATA (DLC=1)
+        tick_n(7); tick();       // -> CRC_FIELD
+        crc_ok = 1'b0;           // CRC checker reports CRC MISMATCH!
+        tick_n(15); tick();      // -> enters ACK
+        check_state("T21-enter  entered ACK with crc_ok=0", ST_ACK);
+
+        // Bit 0: ACK Slot with CRC error
+        // Receiver must NOT drive dominant
+        check_bit("T21-no_ack  receiver withholds ACK (tx_en=0)", 1'b1, 1'b0);
+
+        // Bit 1: Delimiter
+        tick();
+        check_state("T21-delim  in ACK delimiter", ST_ACK);
+
+        // After delimiter: must transition to ERROR_FRAME due to CRC error!
+        tick();
+        check_state("T21-err_frame  CRC error forces ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Clean up
+        crc_ok = 1'b1;
+        tick_n(13); tick(); tick_n(3);
+        check_state("T21-idle  returned to IDLE", ST_IDLE);
 
         // ==================================================================
         // Summary
