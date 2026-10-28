@@ -2,7 +2,9 @@
 // Testbench   : tb_can_bsp
 // Description : Self-checking testbench for the can_bsp FSM.
 //               Verifies state transitions, TX serialisation, bit stuffing,
-//               lost arbitration, data field output, and CRC field output.
+//               lost arbitration, data field, CRC field, ACK slot/delimiter,
+//               EOF with form error detection, IFS with overload/back-to-back,
+//               and ERROR_FRAME 6-dominant/8-recessive driving.
 //
 // Tests:
 //   T1  - Reset -> IDLE
@@ -26,6 +28,14 @@
 //   T19 - Transmitter ACK error: recessive slot -> ERROR_FRAME after delimiter
 //   T20 - Receiver ACK drive: valid CRC -> drives dominant in ACK slot
 //   T21 - Receiver CRC error: crc_ok=0 -> withholds ACK, enters ERROR_FRAME
+//   T22 - EOF normal walkthrough: 7 ticks with bus released (tx_en=0) -> IFS
+//   T23 - EOF form error (bits 0..5): dominant at sample_point -> form_error -> ERROR_FRAME
+//   T24 - EOF bit 6 dominant for TX: transmitter flags form error -> ERROR_FRAME
+//   T25 - EOF bit 6 dominant for RX: receiver accepts as SOF without error -> SOF
+//   T26 - IFS overload error: dominant during bits 0..1 -> ERROR_FRAME
+//   T27 - IFS bit 2 dominant: another node starts -> enters SOF as receiver
+//   T28 - IFS back-to-back TX: tx_request asserted during IFS -> starts SOF at 3rd tick
+//   T29 - ERROR_FRAME drive: 6 dominant bits (tx_en=1) + 8 recessive bits (tx_en=0)
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -54,6 +64,7 @@ module tb_can_bsp;
     logic        tx_en;
     logic        frame_active;
     logic        ack_error;
+    logic        form_error;
     logic        error_out;
     logic [3:0]  state_out;
 
@@ -98,6 +109,7 @@ module tb_can_bsp;
         .tx_en       (tx_en),
         .frame_active(frame_active),
         .ack_error   (ack_error),
+        .form_error  (form_error),
         .error_out   (error_out),
         .state_out   (state_out)
     );
@@ -502,12 +514,6 @@ module tb_can_bsp;
         // T17 -- CRC field bit-by-bit output check
         //
         // Frame: tx_id=0x1A5 (000_1101_0101), tx_dlc=1, tx_data=0xA5 (byte 0).
-        // tx_id=0x1A5 chosen because it has no five-consecutive-same in ARB+CTRL
-        // and no boundary stuff issues with DLC=1 (0001).
-        //
-        // Compute reference CRC over (de-stuffed bits):
-        //   SOF(0) + ID[10:0] + RTR(0) + IDE(0) + r0(0) + DLC(0001) + DATA(0xA5)
-        // Then verify the CRC_FIELD outputs those 15 bits MSB-first + delimiter.
         // ==================================================================
         do_reset();
         tx_id      = 11'h1A5;  // 000_1101_0101 -- no 5-consecutive run
@@ -516,48 +522,32 @@ module tb_can_bsp;
         tx_request = 1'b1;
 
         // Build reference CRC over the unstuffed frame bits:
-        // SOF(0) + ID[10:0] + RTR(0) + IDE(0) + r0(0) + DLC[3:0] + DATA (MSB first)
         ref_crc = 15'h0000;
-        // SOF
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        // ID[10:0] MSB-first
+        ref_crc = crc15_next(ref_crc, 1'b0); // SOF
         for (k = 10; k >= 0; k = k - 1)
             ref_crc = crc15_next(ref_crc, tx_id[k]);
-        // RTR, IDE, r0 (all 0 for standard data frame)
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        ref_crc = crc15_next(ref_crc, 1'b0);
-        // DLC[3:0] MSB-first
+        ref_crc = crc15_next(ref_crc, 1'b0); // RTR
+        ref_crc = crc15_next(ref_crc, 1'b0); // IDE
+        ref_crc = crc15_next(ref_crc, 1'b0); // r0
         for (k = 3; k >= 0; k = k - 1)
             ref_crc = crc15_next(ref_crc, tx_dlc[k]);
-        // DATA byte 0 (tx_data[63:56]) MSB-first
         for (k = 63; k >= 56; k = k - 1)
             ref_crc = crc15_next(ref_crc, tx_data[k]);
 
         $display("T17  reference CRC-15 = 0x%04h (%015b)", ref_crc, ref_crc);
 
-        // Drive the frame through SOF -> ARBITRATION -> CONTROL -> DATA -> CRC_FIELD
         @(negedge clk);   // -> SOF
-        tick();           // -> ARBITRATION (no stuffing: SOF=0, first ARB bits are 000...)
-        tick_n(12);       // -> CONTROL (12 arb bits: 000_1101_0101 + RTR=0)
-        // CONTROL for DLC=1 (0001): bits = IDE(0),r0(0),DLC(0001)
-        // Runs: 00 (2) then 0001 -> max run crossing boundary from ARB:
-        // Last ARB bit = RTR=0. CTRL: 0,0,0,0,0,1. Five consecutive zeros -> stuff bit!
-        // Ticks 1-5: first 4 ctrl bits + stuff, tick 6: DLC[0]=1, tick 7: exits to DATA? No.
-        // Wait - actually CTRL = IDE(0), r0(0), DLC[3](0), DLC[2](0), DLC[1](0), DLC[0](1)
-        // Last ARB bit (RTR=0) carries into CTRL run. After the stuff tick (6th), DLC[0]=1 exits CONTROL.
-        // But the transition is after DLC[0], so 7th tick takes us to DATA.
-        tick_n(6);        // 5 ctrl bits (incl. stuff) + DLC[1]=0 (still in CONTROL)
-        tick();           // 7th: DLC[0]=1 -> DATA (DLC=1, 8 bits)
+        tick();           // -> ARBITRATION
+        tick_n(12);       // -> CONTROL
+        tick_n(6);        // 5 ctrl bits + DLC[1]=0
+        tick();           // 7th: DLC[0]=1 -> DATA
         check_state("T17-setup  entered DATA (DLC=1)", ST_DATA);
-        tick_n(7);        // 7 data bits (still in DATA)
+        tick_n(7);
         tick();           // 8th data bit -> CRC_FIELD
         check_state("T17-crc_entry  entered CRC_FIELD", ST_CRC_FIELD);
 
-        // Wait one extra clock for crc_shift to be latched from crc_computed
         @(negedge clk); @(negedge clk);
 
-        // Now verify each of the 15 CRC bits MSB-first
         begin : crc_check_loop
             logic [14:0] expected_shift;
             int i;
@@ -599,10 +589,10 @@ module tb_can_bsp;
         // T18 -- Transmitter ACK Success:
         // External receiver pulls bus dominant (rx_bit=0) during ACK slot.
         // Node verifies:
-        //   - tx_bit_out=1 (releases bus), tx_en=0 (does not drive dominant)
+        //   - tx_bit_out=1 (releases bus), tx_en=0
         //   - sample_point samples rx_bit=0 -> ack_error=0
         //   - ACK delimiter is recessive
-        //   - 2nd tick transitions to EOF (not ERROR_FRAME)
+        //   - 2nd tick transitions to EOF
         // ==================================================================
         do_reset();
         tx_id      = 11'h1A5;
@@ -617,10 +607,8 @@ module tb_can_bsp;
         tick_n(15); tick();      // 16 ticks in CRC_FIELD -> enters ACK
         check_state("T18-enter  entered ACK state", ST_ACK);
 
-        // Bit 0: ACK Slot
-        // Transmitter must release the bus (recessive 1, tx_en 0)
+        // Bit 0: ACK Slot (TX releases bus)
         check_bit("T18-slot  TX releases bus during ACK slot", 1'b1, 1'b0);
-        // External receiver pulls bus dominant
         rx_bit = 1'b0;
         sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
         @(negedge clk);
@@ -633,16 +621,15 @@ module tb_can_bsp;
         end
 
         // 1st tick of ACK consumed -> moves to bit 1 (ACK delimiter)
-        rx_bit = 1'b1;  // bus returns recessive for delimiter
+        rx_bit = 1'b1;
         tick();
         check_state("T18-delim  in ACK delimiter (still ACK)", ST_ACK);
         check_bit("T18-delim_bit  ACK delimiter recessive", 1'b1, 1'b0);
 
-        // 2nd tick of ACK consumed -> successfully transitions to EOF
+        // 2nd tick -> transitions to EOF
         tick();
         check_state("T18-eof  transitioned to EOF after valid ACK", ST_EOF);
 
-        // Step through EOF (7) and IFS (3) back to IDLE
         tick_n(6); tick();
         tx_request = 1'b0;
         tick_n(3);
@@ -651,10 +638,6 @@ module tb_can_bsp;
         // ==================================================================
         // T19 -- Transmitter ACK Error:
         // No receiver on bus (rx_bit remains 1'b1 recessive during ACK slot).
-        // Node verifies:
-        //   - sample_point samples rx_bit=1 -> ack_error=1
-        //   - delimiter bit 1 stays in ACK
-        //   - 2nd tick transitions to ERROR_FRAME (not EOF)
         // ==================================================================
         do_reset();
         tx_id      = 11'h1A5;
@@ -669,8 +652,6 @@ module tb_can_bsp;
         tick_n(15); tick();      // -> enters ACK
         check_state("T19-enter  entered ACK state", ST_ACK);
 
-        // Bit 0: ACK Slot
-        // Bus remains recessive (rx_bit = 1) -> No ACK
         rx_bit = 1'b1;
         sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
         @(negedge clk);
@@ -682,15 +663,12 @@ module tb_can_bsp;
             $display("[PASS] T19-ack_err  ACK error detected (ack_error=1)");
         end
 
-        // 1st tick -> moves to bit 1 (ACK delimiter)
         tick();
         check_state("T19-delim  in ACK delimiter (still ACK)", ST_ACK);
 
-        // 2nd tick -> must transition to ERROR_FRAME because of ACK error!
         tick();
         check_state("T19-err_frame  ACK error forced ERROR_FRAME", ST_ERROR_FRAME);
 
-        // Clean up: step through ERROR_FRAME (14 ticks) -> IFS (3 ticks) -> IDLE
         tick_n(13); tick();
         tx_request = 1'b0;
         tick_n(3);
@@ -698,18 +676,13 @@ module tb_can_bsp;
 
         // ==================================================================
         // T20 -- Receiver Role: Valid CRC -> Drives dominant ACK
-        // Node enters SOF from bus activity (tx_request=0, rx_bit=0 at sample_point).
-        // With crc_ok = 1:
-        //   - In ACK slot (bit 0): drives tx_bit_out=0 and tx_en=1!
-        //   - In ACK delimiter (bit 1): releases bus (tx_bit_out=1, tx_en=0)
-        //   - Transitions to EOF
         // ==================================================================
         do_reset();
         tx_id      = 11'h1A5;
         tx_dlc     = 4'd1;
         tx_data    = 64'hA500000000000000;
         tx_request = 1'b0;
-        rx_bit     = 1'b0;   // bus goes dominant in IDLE
+        rx_bit     = 1'b0;
         sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
         check_state("T20-sof  bus dominant -> SOF as receiver", ST_SOF);
 
@@ -721,29 +694,21 @@ module tb_can_bsp;
         tick_n(15); tick();      // 16 ticks in CRC_FIELD -> enters ACK
         check_state("T20-enter  receiver entered ACK state", ST_ACK);
 
-        // Bit 0: ACK Slot for Receiver with crc_ok=1
-        // Receiver MUST DRIVE DOMINANT (tx_bit_out=0, tx_en=1)
+        // Receiver drives dominant in ACK slot
         check_bit("T20-rx_ack  receiver drives dominant ACK bit", 1'b0, 1'b1);
 
-        // Bit 1: ACK Delimiter
         tick();
         check_state("T20-delim  receiver in ACK delimiter", ST_ACK);
         check_bit("T20-rx_delim  receiver releases bus for delimiter", 1'b1, 1'b0);
 
-        // After delimiter: transitions to EOF
         tick();
         check_state("T20-eof  receiver transitions to EOF", ST_EOF);
 
-        // Clean up to IDLE
         tick_n(6); tick(); tick_n(3);
         check_state("T20-idle  receiver returned to IDLE", ST_IDLE);
 
         // ==================================================================
         // T21 -- Receiver Role: CRC Error (crc_ok=0) -> No ACK + ERROR_FRAME
-        // Node is receiving. crc_ok=0 indicates CRC failure.
-        // Node verifies:
-        //   - In ACK slot: does NOT drive dominant (tx_en=0, tx_bit_out=1)
-        //   - After delimiter: transitions to ERROR_FRAME
         // ==================================================================
         do_reset();
         tx_id      = 11'h1A5;
@@ -759,26 +724,287 @@ module tb_can_bsp;
         tick_n(12);              // -> CONTROL
         tick_n(6); tick();       // -> DATA (DLC=1)
         tick_n(7); tick();       // -> CRC_FIELD
-        crc_ok = 1'b0;           // CRC checker reports CRC MISMATCH!
+        crc_ok = 1'b0;           // CRC mismatch!
         tick_n(15); tick();      // -> enters ACK
         check_state("T21-enter  entered ACK with crc_ok=0", ST_ACK);
 
-        // Bit 0: ACK Slot with CRC error
-        // Receiver must NOT drive dominant
         check_bit("T21-no_ack  receiver withholds ACK (tx_en=0)", 1'b1, 1'b0);
 
-        // Bit 1: Delimiter
         tick();
         check_state("T21-delim  in ACK delimiter", ST_ACK);
 
-        // After delimiter: must transition to ERROR_FRAME due to CRC error!
         tick();
         check_state("T21-err_frame  CRC error forces ERROR_FRAME", ST_ERROR_FRAME);
 
-        // Clean up
         crc_ok = 1'b1;
         tick_n(13); tick(); tick_n(3);
         check_state("T21-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T22 -- Day 18: EOF Normal Walkthrough & Bus Release
+        // During EOF:
+        //   - tx_bit_out = 1 (recessive)
+        //   - tx_en = 0 (bus released)
+        //   - 7 ticks remain in EOF; 8th tick enters IFS
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick();              // SOF -> ARB
+        tick_n(12);          // ARB -> CTRL
+        tick_n(7);           // CTRL -> DATA
+        tick_n(8);           // DATA -> CRC_FIELD
+        tick_n(16);          // CRC_FIELD -> ACK
+        rx_bit = 1'b0;       // ACK slot dominant
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick();              // ACK slot -> delimiter
+        tick();              // delimiter -> EOF
+        check_state("T22-enter  entered EOF state", ST_EOF);
+        check_bit("T22-bus_idle  EOF releases bus (recessive)", 1'b1, 1'b0);
+
+        // Step through 6 ticks in EOF
+        tick_n(6);
+        check_state("T22-eof_6  6 ticks in EOF (still EOF)", ST_EOF);
+        // 7th tick completes EOF -> transitions to IFS
+        tick();
+        check_state("T22-to_ifs  7th tick in EOF -> IFS", ST_IFS);
+        check_bit("T22-ifs_idle  IFS releases bus (recessive)", 1'b1, 1'b0);
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T22-idle  IFS completes -> IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T23 -- Day 18: EOF Form Error (bits 0..5):
+        // Inject dominant bit (rx_bit = 0 at sample_point) on bit 2 of EOF.
+        // Node must detect form_error = 1 and transition immediately to ERROR_FRAME.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        rx_bit = 1'b0; sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick();      // -> enters EOF
+        check_state("T23-enter  entered EOF", ST_EOF);
+        tick_n(2);           // advance to bit 2 of EOF
+
+        // Inject dominant glitch at sample point
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        @(negedge clk);
+        tests = tests + 1;
+        if (form_error !== 1'b1) begin
+            $display("[FAIL] T23-form_err  expected form_error=1  got=%b", form_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T23-form_err  EOF form error detected (form_error=1)");
+        end
+        check_state("T23-err_frame  EOF form error forced ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Clean up: 14 ticks in ERROR_FRAME -> IFS -> IDLE
+        tx_request = 1'b0;
+        tick_n(14); tick_n(3);
+        check_state("T23-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T24 -- Day 18: EOF Last Bit (Bit 6) for Transmitter:
+        // Transmitter requires all 7 EOF bits to be recessive.
+        // If dominant sampled on bit 6 -> form error -> ERROR_FRAME.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        rx_bit = 1'b0; sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick();      // -> enters EOF
+        tick_n(6);           // advance to bit 6 (7th bit of EOF)
+        check_state("T24-bit6  at 7th bit of EOF (bit_cnt=6)", ST_EOF);
+
+        // Transmitter samples dominant at bit 6
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        @(negedge clk);
+        check_state("T24-tx_err  TX bit 6 dominant -> ERROR_FRAME", ST_ERROR_FRAME);
+        tx_request = 1'b0;
+        tick_n(14); tick_n(3);
+        check_state("T24-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T25 -- Day 18: EOF Last Bit (Bit 6) for Receiver (CAN 2.0 SOF Acceptance):
+        // Under CAN 2.0 spec, a receiver detecting dominant on the last bit of
+        // EOF interprets it as SOF of a new frame without error.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b0;   // receiver role
+        rx_bit     = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        tick(); tick();      // -> enters EOF as receiver
+        tick_n(6);           // advance to bit 6 of EOF
+        check_state("T25-bit6  receiver at 7th bit of EOF", ST_EOF);
+
+        // External transmitter starts new frame (dominant on bit 6)
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        @(negedge clk);
+        check_state("T25-rx_sof  receiver accepted bit 6 dominant as SOF", ST_SOF);
+        tests = tests + 1;
+        if (form_error !== 1'b0) begin
+            $display("[FAIL] T25-no_err  form_error should be 0 on valid SOF, got=%b", form_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T25-no_err  no form error flagged on receiver SOF");
+        end
+
+        // Finish receiving frame
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16); tick(); tick();
+        tick_n(7); tick_n(3);
+        check_state("T25-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T26 -- Day 18: IFS Overload / Protocol Error on Bits 0..1:
+        // Intermission bits 0 and 1 must remain recessive.
+        // Dominant at bit 1 -> overload error -> enters ERROR_FRAME.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        rx_bit = 1'b0; sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick();      // -> EOF
+        tick_n(7);           // 7 EOF ticks -> enters IFS
+        check_state("T26-enter  entered IFS", ST_IFS);
+        tick();              // advance to bit 1 of IFS
+
+        // Dominant pulse on bit 1 of intermission
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        @(negedge clk);
+        check_state("T26-err_frame  IFS early dominant -> ERROR_FRAME", ST_ERROR_FRAME);
+        tx_request = 1'b0;
+        tick_n(14); tick_n(3);
+        check_state("T26-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T27 -- Day 18: IFS 3rd Bit Dominant (Bit 2):
+        // On 3rd intermission bit, another node starts transmitting (dominant).
+        // Node detects dominant at sample_point -> transitions to SOF as receiver.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        rx_bit = 1'b0; sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick(); tick_n(7); // -> IFS
+        check_state("T27-enter  entered IFS", ST_IFS);
+        tx_request = 1'b0;
+        tick_n(2);           // advance to bit 2 (3rd bit of IFS)
+
+        // Dominant bit at sample_point on 3rd bit of intermission
+        rx_bit = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        @(negedge clk);
+        check_state("T27-sof  IFS bit 2 dominant -> SOF as receiver", ST_SOF);
+        // Step through frame to IDLE
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16); tick(); tick();
+        tick_n(7); tick_n(3);
+        check_state("T27-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T28 -- Day 18: IFS Back-to-Back Transmission:
+        // Host asserts tx_request during IFS.
+        // Node waits for intermission to complete (3 ticks), then transitions to SOF.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        rx_bit = 1'b0; sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick(); tick_n(7); // -> IFS
+        check_state("T28-enter  entered IFS", ST_IFS);
+
+        // Host requests new frame during IFS
+        tx_id      = 11'h3C2;
+        tx_request = 1'b1;
+        tick_n(2); // 2 ticks stay in IFS
+        check_state("T28-ifs2  2 ticks in IFS (still IFS)", ST_IFS);
+        tick();    // 3rd tick completes IFS -> enters SOF immediately
+        check_state("T28-sof  IFS completed -> entered SOF for next frame", ST_SOF);
+
+        // Step to IDLE
+        tx_request = 1'b0;
+        tick(); tick_n(12); tick_n(7); tick_n(8); tick_n(16);
+        rx_bit = 1'b0; sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        rx_bit = 1'b1;
+        tick(); tick(); tick_n(7); tick_n(3);
+        check_state("T28-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T29 -- Day 18: ERROR_FRAME Bus Drive (6 Dominant Flag + 8 Recessive Delimiter):
+        // Trigger ERROR_FRAME and verify that:
+        //   - Bits 0..5 (ticks 1..6): tx_bit_out=0, tx_en=1 (actively driving dominant)
+        //   - Bits 6..13 (ticks 7..14): tx_bit_out=1, tx_en=0 (released bus/recessive)
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        tx_request = 1'b1;
+        @(negedge clk);
+        tick(); // -> ARBITRATION
+        // Trigger error via stuff_error
+        @(negedge clk); stuff_error = 1'b1; @(negedge clk); stuff_error = 1'b0;
+        check_state("T29-enter  entered ERROR_FRAME", ST_ERROR_FRAME);
+
+        // First 6 bits of ERROR_FRAME: Error Flag (dominant, actively driven)
+        for (k = 0; k < 6; k = k + 1) begin
+            check_bit($sformatf("T29-flag[%0d] Error Flag dominant drive", k), 1'b0, 1'b1);
+            tick();
+        end
+
+        // Next 8 bits of ERROR_FRAME: Error Delimiter (recessive, released bus)
+        for (k = 0; k < 8; k = k + 1) begin
+            check_bit($sformatf("T29-delim[%0d] Error Delimiter recessive release", k), 1'b1, 1'b0);
+            tick();
+        end
+
+        // 14 ticks complete -> transitions to IFS
+        check_state("T29-to_ifs  14 ERROR_FRAME ticks complete -> IFS", ST_IFS);
+        tx_request = 1'b0;
+        tick_n(3);
+        check_state("T29-idle  returned to IDLE", ST_IDLE);
 
         // ==================================================================
         // Summary

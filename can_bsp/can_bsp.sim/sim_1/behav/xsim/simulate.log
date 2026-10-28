@@ -63,4 +63,79 @@ Time resolution is 1 ps
 [PASS]            T16-end  after 13 ticks -> CONTROL  state=3
 [PASS]                     T16-idle returned to IDLE  state=0
 T17  reference CRC-15 = 0x5617 (101011000010111)
-[PASS]               T17-se
+[PASS]               T17-setup  entered DATA (DLC=1)  state=4
+[PASS]              T17-crc_entry  entered CRC_FIELD  state=5
+[PASS] T17-crc[14]  bit=1
+[PASS] T17-crc[13]  bit=0
+[PASS] T17-crc[12]  bit=1
+[PASS] T17-crc[11]  bit=0
+[PASS] T17-crc[10]  bit=1
+[PASS] T17-crc[9]  bit=1
+[PASS] T17-crc[8]  bit=0
+[PASS] T17-crc[7]  bit=0
+[PASS] T17-crc[6]  bit=0
+[PASS] T17-crc[5]  bit=0
+[PASS] T17-crc[4]  bit=1
+[PASS] T17-crc[3]  bit=0
+[PASS] T17-crc[2]  bit=1
+[PASS] T17-crc[1]  bit=1
+[PASS] T17-crc[0]  bit=1
+[PASS] T17-delim  CRC delimiter=1
+[PASS]               T17-ack  after CRC_FIELD -> ACK  state=6
+[PASS]                     T17-end  returned to IDLE  state=0
+[PASS]                  T18-enter  entered ACK state  state=6
+[PASS]     T18-slot  TX releases bus during ACK slot  bit=1 en=0
+[PASS] T18-ack_ok  frame successfully ACKed (ack_error=0)
+[PASS]       T18-delim  in ACK delimiter (still ACK)  state=6
+[PASS]        T18-delim_bit  ACK delimiter recessive  bit=1 en=0
+[PASS]  T18-eof  transitioned to EOF after valid ACK  state=7
+[PASS]                    T18-idle  returned to IDLE  state=0
+[PASS]                  T19-enter  entered ACK state  state=6
+[PASS] T19-ack_err  ACK error detected (ack_error=1)
+[PASS]       T19-delim  in ACK delimiter (still ACK)  state=6
+[PASS]   T19-err_frame  ACK error forced ERROR_FRAME  state=9
+[PASS]                    T19-idle  returned to IDLE  state=0
+[PASS]      T20-sof  bus dominant -> SOF as receiver  state=1
+[PASS]         T20-enter  receiver entered ACK state  state=6
+[PASS]  T20-rx_ack  receiver drives dominant ACK bit  bit=0 en=1
+[PASS]          T20-delim  receiver in ACK delimiter  state=6
+[PASS] T20-rx_delim  receiver releases bus for delimiter  bit=1 en=0
+[PASS]          T20-eof  receiver transitions to EOF  state=7
+[PASS]           T20-idle  receiver returned to IDLE  state=0
+[PASS]              T21-sof  entered SOF as receiver  state=1
+[PASS]          T21-enter  entered ACK with crc_ok=0  state=6
+[PASS]  T21-no_ack  receiver withholds ACK (tx_en=0)  bit=1 en=0
+[PASS]                   T21-delim  in ACK delimiter  state=6
+[PASS]   T21-err_frame  CRC error forces ERROR_FRAME  state=9
+[PASS]                    T21-idle  returned to IDLE  state=0
+[PASS]                  T22-enter  entered EOF state  state=7
+[PASS]    T22-bus_idle  EOF releases bus (recessive)  bit=1 en=0
+[PASS]         T22-eof_6  6 ticks in EOF (still EOF)  state=7
+[PASS]            T22-to_ifs  7th tick in EOF -> IFS  state=8
+[PASS]    T22-ifs_idle  IFS releases bus (recessive)  bit=1 en=0
+[PASS]               T22-idle  IFS completes -> IDLE  state=0
+[PASS]                        T23-enter  entered EOF  state=7
+[PASS] T23-form_err  EOF form error detected (form_error=1)
+[PASS] T23-err_frame  EOF form error forced ERROR_FRAME  state=9
+[PASS]                    T23-idle  returned to IDLE  state=0
+[PASS]       T24-bit6  at 7th bit of EOF (bit_cnt=6)  state=7
+[PASS]  T24-tx_err  TX bit 6 dominant -> ERROR_FRAME  state=9
+[PASS]                    T24-idle  returned to IDLE  state=0
+[PASS]          T25-bit6  receiver at 7th bit of EOF  state=7
+[PASS] T25-rx_sof  receiver accepted bit 6 dominant as SOF  state=1
+[PASS] T25-no_err  no form error flagged on receiver SOF
+[PASS]                    T25-idle  returned to IDLE  state=0
+[PASS]                        T26-enter  entered IFS  state=8
+[PASS] T26-err_frame  IFS early dominant -> ERROR_FRAME  state=9
+[PASS]                    T26-idle  returned to IDLE  state=0
+[PASS]                        T27-enter  entered IFS  state=8
+[PASS] T27-sof  IFS bit 2 dominant -> SOF as receiver  state=1
+[PASS]                    T27-idle  returned to IDLE  state=0
+[PASS]                        T28-enter  entered IFS  state=8
+[PASS]          T28-ifs2  2 ticks in IFS (still IFS)  state=8
+[PASS] T28-sof  IFS completed -> entered SOF for next frame  state=1
+[PASS]                    T28-idle  returned to IDLE  state=0
+[PASS]                T29-enter  entered ERROR_FRAME  state=9
+[PASS]         T29-flag[0] Error Flag dominant drive  bit=0 en=1
+[PASS]         T29-flag[1] Error Flag dominant drive  bit=0 en=1
+[PASS]         T29-f
