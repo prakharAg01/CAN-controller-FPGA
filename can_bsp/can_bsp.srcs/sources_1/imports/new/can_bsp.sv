@@ -1,9 +1,9 @@
 //=============================================================================
-// Module      : can_bsp   (Bus Synchronisation Protocol -- Day 18 Complete)
+// Module      : can_bsp   (Bus Synchronisation Protocol -- Day 19 Complete)
 // Description : Frame-level FSM for a Classical CAN 2.0A controller
 //               (standard frames only, 11-bit base ID).
 //
-// Implementation status (Days 10-18):
+// Implementation status (Days 10-19):
 //   DONE : SOF, ARBITRATION, CONTROL -- TX serialisation + bit stuffing + arb
 //   DONE : DATA field -- TX serialisation from data_shift, stuffing enabled
 //   DONE : CRC_FIELD  -- transmits 15-bit CRC-15 sequence + 1-bit delimiter
@@ -25,6 +25,11 @@
 //                        Normal exit: tx_request ? SOF : IDLE.
 //   DONE : ERROR_FRAME -- Day 18: 6 dominant error flag (tx_en=1, tx_bit=0) +
 //                        8 recessive error delimiter (tx_en=0, tx_bit=1) = 14 bits.
+//   DONE : DE-STUFFING -- Day 19: Integrated can_bit_destuffer into RX path.
+//                        - Active during SOF, ARBITRATION, CONTROL, DATA, CRC_FIELD.
+//                        - Drops inserted stuff bits so RX sees clean protocol bits.
+//                        - Detects stuff errors (6 consecutive identical bits) -> ERROR_FRAME.
+//                        - Outputs destuffed rx_data_bit, rx_data_valid, rx_stuff_error.
 //
 // State encoding:
 //   IDLE        - bus idle, waiting for SOF or tx_request
@@ -64,7 +69,7 @@
 //   tx_id [10:0]       - identifier to transmit (latched at SOF)
 //   tx_dlc [3:0]       - data length code (0..8, latched at SOF)
 //   tx_data [63:0]     - data bytes to transmit (latched at SOF, byte 0 in [63:56])
-//   stuff_error        - bit-stuffing violation detected (from destuffer)
+//   stuff_error        - external stuffing violation input (OR-ed with internal destuffer)
 //   crc_ok             - CRC match on received frame (from CRC checker)
 //
 // Outputs:
@@ -73,6 +78,9 @@
 //   frame_active       - 1 while a frame is in progress (not IDLE/IFS)
 //   ack_error          - 1 = transmitter detected ACK error in ACK slot
 //   form_error         - 1 = form error detected (EOF or delimiters)
+//   rx_data_bit        - de-stuffed protocol bit received from bus
+//   rx_data_valid      - 1-clk strobe: rx_data_bit is a real destuffed protocol bit
+//   rx_stuff_error     - 1-clk strobe: destuffer detected 6 identical bits in a row
 //   error_out          - 1-clk error pulse
 //   state_out [3:0]    - numeric state for debug
 //=============================================================================
@@ -94,17 +102,20 @@ module can_bsp (
     input  logic [63:0] tx_data,     // data bytes (byte 0 in [63:56], MSB sent first)
 
     // Error inputs
-    input  logic        stuff_error, // stuffing violation from destuffer
+    input  logic        stuff_error, // stuffing violation input
     input  logic        crc_ok,      // CRC correct (RX path)
 
     // Outputs
-    output logic        tx_bit,      // bit to drive on bus (held between ticks)
-    output logic        tx_en,       // 1 = this node drives the bus
-    output logic        frame_active,// 1 = frame in progress
-    output logic        ack_error,   // 1 = transmitter detected ACK error in ACK slot
-    output logic        form_error,  // 1 = form error detected (EOF or delimiters)
-    output logic        error_out,   // 1-clk error pulse
-    output logic [3:0]  state_out    // numeric state for debug
+    output logic        tx_bit,        // bit to drive on bus (held between ticks)
+    output logic        tx_en,         // 1 = this node drives the bus
+    output logic        frame_active,  // 1 = frame in progress
+    output logic        ack_error,     // 1 = transmitter detected ACK error in ACK slot
+    output logic        form_error,    // 1 = form error detected (EOF or delimiters)
+    output logic        rx_data_bit,   // de-stuffed RX bit (Day 19)
+    output logic        rx_data_valid, // 1-clk pulse: rx_data_bit is valid protocol bit (Day 19)
+    output logic        rx_stuff_error,// 1-clk pulse: destuffer error detected (Day 19)
+    output logic        error_out,     // 1-clk error pulse
+    output logic [3:0]  state_out      // numeric state for debug
 );
 
     // =========================================================================
@@ -155,13 +166,27 @@ module can_bsp (
     logic        form_err_reg;
     assign form_error = form_err_reg;
 
-    // Bit stuffer interface wires
+    // Bit stuffer interface wires (TX path)
     logic        stuff_en;
     logic        stuffer_ready;
     logic        stuffer_bit_out;
     logic        stuffer_bit_out_valid;
     logic        stuff_pending;
     logic        stuffing_active;
+
+    // Bit destuffer interface wires (RX path -- Day 19)
+    logic        destuff_en;
+    logic        destuff_bit_out;
+    logic        destuff_data_valid;
+    logic        destuff_stuff_error;
+    logic        destuff_stuff_expected;
+
+    assign rx_data_bit    = destuff_bit_out;
+    assign rx_data_valid  = destuff_data_valid;
+    assign rx_stuff_error = destuff_stuff_error;
+
+    // Combined stuff error: internal destuffer violation OR external stuff_error input
+    wire effective_stuff_error = stuff_error || destuff_stuff_error;
 
     // CRC module wires
     logic        crc_init_p;    // synchronous init pulse to can_crc
@@ -207,7 +232,7 @@ module can_bsp (
                             sample_point && (rx_bit == 1'b0);
 
     // =========================================================================
-    // Bit stuffer instantiation
+    // Bit stuffer instantiation (TX path)
     // Active during SOF, ARBITRATION, CONTROL, and DATA.
     // CRC_FIELD: no stuffing (per CAN 2.0A, stuffing ends after the data field).
     // =========================================================================
@@ -231,6 +256,38 @@ module can_bsp (
         .bit_out       (stuffer_bit_out),
         .bit_out_valid (stuffer_bit_out_valid),
         .stuffing      (stuffing_active)
+    );
+
+    // =========================================================================
+    // Bit destuffer instantiation (RX path -- Day 19)
+    // Active during SOF, ARBITRATION, CONTROL, DATA, and CRC_FIELD (bits 0..14).
+    // In CRC_FIELD bit 15 (CRC delimiter) and beyond, destuff_en is 0.
+    // can_bit_destuffer drops any inserted stuff bit and pulses destuff_data_valid
+    // only when a genuine, de-stuffed protocol bit arrives.
+    // If 6 consecutive identical bits are received, it pulses destuff_stuff_error.
+    // =========================================================================
+    assign destuff_en = (state == SOF) ||
+                        (state == ARBITRATION) ||
+                        (state == CONTROL) ||
+                        (state == DATA) ||
+                        ((state == CRC_FIELD) && (bit_cnt < 7'd15));
+
+    // Clear destuffer on synchronous abort or whenever frame starts/restarts
+    wire destuff_clear = clear || (state == IDLE && next_state == SOF)
+                               || (state == IFS  && next_state == SOF)
+                               || (state == EOF  && next_state == SOF);
+
+    can_bit_destuffer u_destuffer (
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .clear          (destuff_clear),
+        .destuff_en     (destuff_en),
+        .bit_valid      (sample_point),
+        .bit_in         (rx_bit),
+        .bit_out        (destuff_bit_out),
+        .data_valid     (destuff_data_valid),
+        .stuff_error    (destuff_stuff_error),
+        .stuff_expected (destuff_stuff_expected)
     );
 
     // =========================================================================
@@ -497,7 +554,7 @@ module can_bsp (
         // ----------------------------------------------------------------------
         // Error override: any immediate error triggers ERROR_FRAME
         // ----------------------------------------------------------------------
-        if (stuff_error || form_err_detected || ifs_overload_err)
+        if (effective_stuff_error || form_err_detected || ifs_overload_err)
             next_state = ERROR_FRAME;
     end
 

@@ -36,6 +36,8 @@
 //   T27 - IFS bit 2 dominant: another node starts -> enters SOF as receiver
 //   T28 - IFS back-to-back TX: tx_request asserted during IFS -> starts SOF at 3rd tick
 //   T29 - ERROR_FRAME drive: 6 dominant bits (tx_en=1) + 8 recessive bits (tx_en=0)
+//   T30 - RX De-stuffing: 5 dominant bits followed by complementary stuff bit dropped
+//   T31 - RX De-stuffing Stuff Error: 6 identical consecutive bits triggers ERROR_FRAME
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -65,6 +67,9 @@ module tb_can_bsp;
     logic        frame_active;
     logic        ack_error;
     logic        form_error;
+    logic        rx_data_bit;
+    logic        rx_data_valid;
+    logic        rx_stuff_error;
     logic        error_out;
     logic [3:0]  state_out;
 
@@ -93,25 +98,28 @@ module tb_can_bsp;
     // DUT instantiation
     // -------------------------------------------------------------------------
     can_bsp dut (
-        .clk         (clk),
-        .rst_n       (rst_n),
-        .clear       (clear),
-        .bit_tick    (bit_tick),
-        .sample_point(sample_point),
-        .rx_bit      (rx_bit),
-        .tx_request  (tx_request),
-        .tx_id       (tx_id),
-        .tx_dlc      (tx_dlc),
-        .tx_data     (tx_data),
-        .stuff_error (stuff_error),
-        .crc_ok      (crc_ok),
-        .tx_bit      (tx_bit_out),
-        .tx_en       (tx_en),
-        .frame_active(frame_active),
-        .ack_error   (ack_error),
-        .form_error  (form_error),
-        .error_out   (error_out),
-        .state_out   (state_out)
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .clear         (clear),
+        .bit_tick      (bit_tick),
+        .sample_point  (sample_point),
+        .rx_bit        (rx_bit),
+        .tx_request    (tx_request),
+        .tx_id         (tx_id),
+        .tx_dlc        (tx_dlc),
+        .tx_data       (tx_data),
+        .stuff_error   (stuff_error),
+        .crc_ok        (crc_ok),
+        .tx_bit        (tx_bit_out),
+        .tx_en         (tx_en),
+        .frame_active  (frame_active),
+        .ack_error     (ack_error),
+        .form_error    (form_error),
+        .rx_data_bit   (rx_data_bit),
+        .rx_data_valid (rx_data_valid),
+        .rx_stuff_error(rx_stuff_error),
+        .error_out     (error_out),
+        .state_out     (state_out)
     );
 
     // -------------------------------------------------------------------------
@@ -1005,6 +1013,125 @@ module tb_can_bsp;
         tx_request = 1'b0;
         tick_n(3);
         check_state("T29-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T30 -- Day 19: RX Path De-stuffing Verification
+        // Verify that 5 consecutive dominant (0) bits followed by a complementary
+        // stuff bit (1) on the bus correctly has the stuff bit dropped:
+        //   - For the 5 dominant bits: rx_data_valid=1, rx_data_bit=0
+        //   - For the 6th bit (stuff bit=1): rx_data_valid=0 (dropped by destuffer!)
+        //   - For the 7th bit (next real bit=0): rx_data_valid=1, rx_data_bit=0
+        // ==================================================================
+        do_reset();
+        tx_request = 1'b0;
+        rx_bit     = 1'b0; // start SOF
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_state("T30-sof  bus dominant -> SOF", ST_SOF);
+
+        tick(); // -> ARBITRATION
+        check_state("T30-arb  entered ARBITRATION", ST_ARBITRATION);
+
+        // Feed 5 consecutive dominant bits (0, 0, 0, 0, 0)
+        // Timing: sample_point goes high at negedge N.
+        //   posedge N+½ : destuffer registers data_valid=1
+        //   negedge N+1 : data_valid is now readable  <-- check HERE
+        //   posedge N+3/2: destuffer clears data_valid back to 0
+        // So check at the FIRST @(negedge clk) after sample_point=1.
+        for (k = 0; k < 5; k = k + 1) begin
+            rx_bit = 1'b0;
+            sample_point = 1'b1;
+            @(negedge clk); // negedge N+1: data_valid now valid
+            tests = tests + 1;
+            if (rx_data_valid !== 1'b1 || rx_data_bit !== 1'b0) begin
+                $display("[FAIL] T30-bit[%0d] expected valid=1 bit=0, got valid=%b bit=%b",
+                         k, rx_data_valid, rx_data_bit);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T30-bit[%0d] destuffed bit valid=1 bit=0", k);
+            end
+            sample_point = 1'b0;
+            tick();
+        end
+
+        // 6th bit on the bus is a complementary stuff bit ('1')
+        // destuffer sets data_valid=0 (stuff bit consumed); check at negedge N+1.
+        rx_bit = 1'b1;
+        sample_point = 1'b1;
+        @(negedge clk); // negedge N+1: data_valid=0 (stuff bit dropped)
+        tests = tests + 1;
+        if (rx_data_valid !== 1'b0) begin
+            $display("[FAIL] T30-stuff_drop expected stuff bit to be dropped (valid=0), got valid=%b", rx_data_valid);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T30-stuff_drop stuff bit successfully dropped (valid=0)");
+        end
+        sample_point = 1'b0;
+        tick();
+
+        // 7th bit on the bus is the next real data bit ('0')
+        rx_bit = 1'b0;
+        sample_point = 1'b1;
+        @(negedge clk); // negedge N+1: data_valid=1 again (real bit)
+        tests = tests + 1;
+        if (rx_data_valid !== 1'b1 || rx_data_bit !== 1'b0) begin
+            $display("[FAIL] T30-next_real expected valid=1 bit=0, got valid=%b bit=%b", rx_data_valid, rx_data_bit);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T30-next_real resume real bit valid=1 bit=0");
+        end
+        sample_point = 1'b0;
+        tick();
+
+        // Clean up: return to IDLE
+        clear = 1'b1; @(negedge clk); clear = 1'b0;
+        check_state("T30-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T31 -- Day 19: RX Path Stuff Error Detection (6 Identical Consecutive Bits)
+        // In ARBITRATION, feed 6 consecutive dominant bits without complementary stuff bit.
+        // Node verifies:
+        //   - rx_stuff_error pulses high
+        //   - FSM immediately transitions to ERROR_FRAME
+        // ==================================================================
+        do_reset();
+        tx_request = 1'b0;
+        rx_bit     = 1'b0;
+        sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+        check_state("T31-sof  bus dominant -> SOF", ST_SOF);
+
+        tick(); // -> ARBITRATION
+        check_state("T31-arb  entered ARBITRATION", ST_ARBITRATION);
+
+        // Feed 5 consecutive 0s
+        for (k = 0; k < 5; k = k + 1) begin
+            rx_bit = 1'b0;
+            sample_point = 1'b1; @(negedge clk); sample_point = 1'b0;
+            tick();
+        end
+
+        // 6th bit is ALSO 0 (stuffing violation! should have been 1)
+        // stuff_error pulses at negedge N+1 (one posedge after sample_point).
+        // FSM also sees effective_stuff_error at that posedge and will be in
+        // ERROR_FRAME by negedge N+2 (which check_state captures internally).
+        rx_bit = 1'b0;
+        sample_point = 1'b1;
+        @(negedge clk); // negedge N+1: stuff_error pulse is live
+        tests = tests + 1;
+        if (rx_stuff_error !== 1'b1) begin
+            $display("[FAIL] T31-stuff_err expected rx_stuff_error=1, got=%b", rx_stuff_error);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T31-stuff_err destuffer flagged stuffing violation (rx_stuff_error=1)");
+        end
+        sample_point = 1'b0;
+
+        // check_state() calls @(negedge clk) internally, landing on negedge N+2
+        // where ERROR_FRAME is now visible.
+        check_state("T31-err_frame  stuffing violation forced ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Step to IDLE
+        tick_n(13); tick(); tick_n(3);
+        check_state("T31-idle  returned to IDLE", ST_IDLE);
 
         // ==================================================================
         // Summary
