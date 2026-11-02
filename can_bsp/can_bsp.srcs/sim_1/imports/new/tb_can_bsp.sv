@@ -38,6 +38,7 @@
 //   T29 - ERROR_FRAME drive: 6 dominant bits (tx_en=1) + 8 recessive bits (tx_en=0)
 //   T30 - RX De-stuffing: 5 dominant bits followed by complementary stuff bit dropped
 //   T31 - RX De-stuffing Stuff Error: 6 identical consecutive bits triggers ERROR_FRAME
+//   T32 - Full Frame end-to-end bit-for-bit verification (Day 20)
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -393,6 +394,7 @@ module tb_can_bsp;
         tx_dlc     = 4'd1;
         tx_request = 1'b1;
         @(negedge clk);   // -> SOF
+        tx_request = 1'b0;   // single frame: deassert once in flight
         tick();           // -> ARBITRATION
 
         @(negedge clk);
@@ -415,6 +417,7 @@ module tb_can_bsp;
         tx_data    = 64'hA5A5A5A5A5A5A5A5;
         tx_request = 1'b1;
         @(negedge clk);   // -> SOF
+        tx_request = 1'b0;   // single frame: deassert once in flight
         tick();           // SOF tick -> enters ARBITRATION, bus holds SOF (0)
         check_state("T14-init  SOF -> ARBITRATION", ST_ARBITRATION);
 
@@ -1132,6 +1135,116 @@ module tb_can_bsp;
         // Step to IDLE
         tick_n(13); tick(); tick_n(3);
         check_state("T31-idle  returned to IDLE", ST_IDLE);
+
+        // ==================================================================
+        // T32 -- Day 20: Full Frame End-to-End Bit-for-Bit Verification
+        // Frame: tx_id=11'h1A5, tx_dlc=4'd1, tx_data=64'hA500000000000000
+        // CRC-15 = 15'h5617  (101_0110_0001_0111)
+        // 56 bit-times: SOF+ARB+RTR(13)+CTRL_stuffed(7)+DATA(8)
+        //               +CRC_FIELD(16)+ACK(2)+EOF(7)+IFS(3)->IDLE
+        // Checks tx_bit, tx_en, frame_active at every tick vs golden;
+        // injects dominant ACK at step 43 to avoid ack_error.
+        // ==================================================================
+        do_reset();
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd1;
+        tx_data    = 64'hA500000000000000;
+        crc_ok     = 1'b1;
+        tx_request = 1'b1;
+        @(negedge clk);   // -> SOF
+        tx_request = 1'b0;   // single frame: deassert once in flight
+
+        begin : T32_full_frame
+            // 56-bit golden streams (MSB = step 0, LSB = step 55)
+            // gbits: expected tx_bit per step
+            // gens : tx_en=1 for steps 0-42, tx_en=0 for steps 43-55
+            // gfa  : frame_active=1 for steps 0-51, 0 for steps 52-55
+            logic [55:0] t32_gbits;
+            logic [55:0] t32_gens;
+            logic [55:0] t32_gfa;
+            logic [3:0]  t32_exp_st;
+            int          t32_j;
+
+            t32_gbits = 56'h1A505A5AC2FFFF;
+            t32_gens  = 56'hFFFFFFFFFFE000;
+            t32_gfa   = 56'hFFFFFFFFFFFFF0;
+
+            for (t32_j = 0; t32_j < 56; t32_j = t32_j + 1) begin
+                tick();
+
+                // Step 43 (first tick landing in ACK state after CRC_DELIM):
+                // inject dominant ACK from receiver before the check.
+                if (t32_j == 43) begin
+                    @(negedge clk);
+                    rx_bit       = 1'b0;
+                    sample_point = 1'b1;
+                    @(negedge clk);
+                    sample_point = 1'b0;
+                    rx_bit       = 1'b1;
+                end
+
+                // Check tx_bit, tx_en, frame_active
+                @(negedge clk);
+                tests = tests + 1;
+                if (tx_bit_out !== t32_gbits[55] || tx_en !== t32_gens[55] ||
+                    frame_active !== t32_gfa[55]) begin
+                    $display("[FAIL] T32-step[%02d]  exp bit=%b en=%b fa=%b  got bit=%b en=%b fa=%b",
+                             t32_j, t32_gbits[55], t32_gens[55], t32_gfa[55],
+                             tx_bit_out, tx_en, frame_active);
+                    errors = errors + 1;
+                end else begin
+                    $display("[PASS] T32-step[%02d]  bit=%b en=%b fa=%b state=%0d",
+                             t32_j, tx_bit_out, tx_en, frame_active, state_out);
+                end
+                t32_gbits = {t32_gbits[54:0], 1'b0};
+                t32_gens  = {t32_gens[54:0],  1'b0};
+                t32_gfa   = {t32_gfa[54:0],   1'b0};
+
+                // State-transition checks at key steps
+                t32_exp_st = 4'd15;   // sentinel: no check
+                if      (t32_j ==  0) t32_exp_st = ST_ARBITRATION;
+                else if (t32_j == 12) t32_exp_st = ST_CONTROL;
+                else if (t32_j == 19) t32_exp_st = ST_DATA;
+                else if (t32_j == 27) t32_exp_st = ST_CRC_FIELD;
+                else if (t32_j == 43) t32_exp_st = ST_ACK;
+                else if (t32_j == 45) t32_exp_st = ST_EOF;
+                else if (t32_j == 52) t32_exp_st = ST_IFS;
+                else if (t32_j == 55) t32_exp_st = ST_IDLE;
+
+                if (t32_exp_st !== 4'd15) begin
+                    tests = tests + 1;
+                    if (state_out !== t32_exp_st) begin
+                        $display("[FAIL] T32-state[%02d]  expected=%0d got=%0d",
+                                 t32_j, t32_exp_st, state_out);
+                        errors = errors + 1;
+                    end else begin
+                        $display("[PASS] T32-state[%02d]  state=%0d correct", t32_j, state_out);
+                    end
+                end
+
+                // ACK error check at step 43
+                if (t32_j == 43) begin
+                    tests = tests + 1;
+                    if (ack_error !== 1'b0) begin
+                        $display("[FAIL] T32-ack_err  expected ack_error=0 got=%b", ack_error);
+                        errors = errors + 1;
+                    end else begin
+                        $display("[PASS] T32-ack_err  ACK received cleanly (ack_error=0)");
+                    end
+                end
+            end
+
+            // Final: no error flags
+            tests = tests + 1;
+            if (form_error !== 1'b0) begin
+                $display("[FAIL] T32-form_err  unexpected form_error=%b", form_error);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T32-form_err  no form error across full frame");
+            end
+        end
+
+        tx_request = 1'b0;
 
         // ==================================================================
         // Summary
