@@ -39,6 +39,9 @@
 //   T30 - RX De-stuffing: 5 dominant bits followed by complementary stuff bit dropped
 //   T31 - RX De-stuffing Stuff Error: 6 identical consecutive bits triggers ERROR_FRAME
 //   T32 - Full Frame end-to-end bit-for-bit verification (Day 20)
+//   T33 - EML Hook Verification in BSP: TEC update on error and success (Day 24)
+//   T34 - Passive Error Flag Generation in BSP FSM: recessive drive in ERROR_FRAME (Day 24)
+//   T35 - Bus-Off State & Recovery in BSP FSM: bus isolation and recovery (Day 24)
 //
 // XSim note: all variables declared at module level.
 //=============================================================================
@@ -73,6 +76,16 @@ module tb_can_bsp;
     logic        rx_stuff_error;
     logic        error_out;
     logic [3:0]  state_out;
+
+    // EML signals (Day 24)
+    logic        bus_off_recovery;
+    logic [7:0]  tec_out;
+    logic [7:0]  rec_out;
+    logic [1:0]  node_state_out;
+    logic        error_active_out;
+    logic        error_passive_out;
+    logic        bus_off_out;
+    logic        error_warning_out;
 
     // -------------------------------------------------------------------------
     // State encoding -- mirrors the DUT enum (must stay in sync)
@@ -120,7 +133,15 @@ module tb_can_bsp;
         .rx_data_valid (rx_data_valid),
         .rx_stuff_error(rx_stuff_error),
         .error_out     (error_out),
-        .state_out     (state_out)
+        .state_out     (state_out),
+        .bus_off_recovery(bus_off_recovery),
+        .tec           (tec_out),
+        .rec           (rec_out),
+        .node_state    (node_state_out),
+        .error_active  (error_active_out),
+        .error_passive (error_passive_out),
+        .bus_off       (bus_off_out),
+        .error_warning (error_warning_out)
     );
 
     // -------------------------------------------------------------------------
@@ -209,8 +230,10 @@ module tb_can_bsp;
         rx_bit      = 1'b1;   // idle bus = recessive
         tx_request  = 1'b0;
         clear       = 1'b0;
+        bus_off_recovery = 1'b0;
         stuff_error = 1'b0;
         crc_ok      = 1'b1;
+        bus_off_recovery = 1'b0;
         @(negedge clk);
         rst_n = 1'b1;
         @(negedge clk);
@@ -233,7 +256,9 @@ module tb_can_bsp;
         tx_data     = 64'h0;
         stuff_error = 1'b0;
         crc_ok      = 1'b1;
+        bus_off_recovery = 1'b0;
         clear       = 1'b0;
+        bus_off_recovery = 1'b0;
 
         // ==================================================================
         // T1 -- reset -> IDLE
@@ -1245,6 +1270,255 @@ module tb_can_bsp;
         end
 
         tx_request = 1'b0;
+
+        // ==================================================================
+        // T33 -- Day 24: EML Hook Verification in BSP (TEC update on error/success)
+        // Verify:
+        //   - Initial TEC = 0, REC = 0, node_state = ERROR_ACTIVE (0)
+        //   - Transmit frame with no ACK (rx_bit=1 during ACK slot) -> ACK error
+        //   - FSM enters ERROR_FRAME and TEC increments by 8 (tec_out = 8)
+        //   - Return to IDLE through ERROR_FRAME and IFS
+        //   - Transmit a complete clean frame (with ACK) -> EOF -> IFS
+        //   - EML detects tx_success and decrements TEC by 1 (tec_out = 7)
+        // ==================================================================
+        do_reset();
+        @(negedge clk);
+        tests = tests + 1;
+        if (tec_out !== 8'd0 || node_state_out !== 2'b00 || error_active_out !== 1'b1) begin
+            $display("[FAIL] T33-init  expected tec=0, node_state=0, error_active=1  got tec=%0d state=%0d act=%b",
+                     tec_out, node_state_out, error_active_out);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T33-init  EML initialized in ERROR_ACTIVE (tec=0, rec=0)");
+        end
+
+        // 1. Transmit frame with ACK error (rx_bit held recessive 1)
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd0;
+        tx_request = 1'b1;
+        rx_bit     = 1'b1; // recessive bus (no ACK)
+        @(negedge clk); // -> SOF
+        tx_request = 1'b0;
+
+        // Step to ACK slot: SOF(1) + ARB(12) + CTRL(7) + CRC(16) = 36 ticks
+        tick_n(36);
+        check_state("T33-ack_entry  entered ACK state", ST_ACK);
+
+        // Bit 0 of ACK (slot): sample point with rx_bit=1 -> sets ack_error
+        @(negedge clk);
+        sample_point = 1'b1;
+        @(negedge clk);
+        sample_point = 1'b0;
+
+        // Bit 1 of ACK (delimiter): tick -> FSM transitions to ERROR_FRAME
+        tick();
+        tick(); // transition to ERROR_FRAME
+        check_state("T33-ack_err_fsm  ACK error forced ERROR_FRAME", ST_ERROR_FRAME);
+
+        // Check that EML inside BSP saw the error and incremented TEC by 8
+        @(negedge clk);
+        tests = tests + 1;
+        if (tec_out !== 8'd8) begin
+            $display("[FAIL] T33-tec_inc  expected tec=8, got=%0d", tec_out);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T33-tec_inc  ACK error incremented TEC to 8");
+        end
+
+        // Step through ERROR_FRAME (14 ticks) and IFS (3 ticks) back to IDLE
+        tick_n(13); tick(); tick_n(3);
+        check_state("T33-idle  returned to IDLE", ST_IDLE);
+
+        // 2. Transmit clean frame with dominant ACK: TEC should decrement from 8 to 7
+        tx_id      = 11'h1A5;
+        tx_dlc     = 4'd0;
+        tx_request = 1'b1;
+        @(negedge clk); // -> SOF
+        tx_request = 1'b0;
+        tick_n(36); // to ACK state
+        // Provide dominant ACK
+        @(negedge clk);
+        rx_bit       = 1'b0;
+        sample_point = 1'b1;
+        @(negedge clk);
+        sample_point = 1'b0;
+        rx_bit       = 1'b1;
+        tick_n(2); // ACK ticks -> EOF
+        check_state("T33-eof  entered EOF with clean ACK", ST_EOF);
+
+        tick_n(7); // 7 EOF ticks -> clean tx_success strobe generated -> IFS
+        check_state("T33-ifs  EOF complete -> IFS (tx_success)", ST_IFS);
+
+        @(negedge clk);
+        tests = tests + 1;
+        if (tec_out !== 8'd7) begin
+            $display("[FAIL] T33-tec_dec  expected tec=7 (8-1), got=%0d", tec_out);
+            errors = errors + 1;
+        end else begin
+            $display("[PASS] T33-tec_dec  clean frame transmission decremented TEC to 7");
+        end
+        tick_n(3); // IFS -> IDLE
+
+        // ==================================================================
+        // T34 -- Day 24: Passive Error Flag Generation in BSP FSM
+        // When node is ERROR_PASSIVE (TEC > 127):
+        //   - Error Flag must be 6 RECESSIVE bits (tx_bit=1, tx_en=0)
+        //   - Contrasts with Error-Active (which drives 6 dominant: tx_bit=0, tx_en=1)
+        // ==================================================================
+        begin : T34_passive_error
+            int t34_err_idx;
+            for (t34_err_idx = 0; t34_err_idx < 16; t34_err_idx = t34_err_idx + 1) begin
+                tx_id      = 11'h1A5;
+                tx_dlc     = 4'd0;
+                tx_request = 1'b1;
+                @(negedge clk);
+                tx_request = 1'b0;
+                tick(); // -> ARB
+                @(negedge clk);
+                stuff_error = 1'b1;
+                @(negedge clk);
+                stuff_error = 1'b0;
+                tick_n(14); tick_n(3);
+            end
+
+            // Check node is now in ERROR_PASSIVE
+            @(negedge clk);
+            tests = tests + 1;
+            if (error_passive_out !== 1'b1 || node_state_out !== 2'b01) begin
+                $display("[FAIL] T34-state  expected ERROR_PASSIVE (state=1), got tec=%0d state=%0d pas=%b",
+                         tec_out, node_state_out, error_passive_out);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T34-state  node successfully entered ERROR_PASSIVE (tec=%0d)", tec_out);
+            end
+
+            // Now trigger an error while in ERROR_PASSIVE
+            tx_id      = 11'h1A5;
+            tx_dlc     = 4'd0;
+            tx_request = 1'b1;
+            @(negedge clk);
+            tx_request = 1'b0;
+            tick(); // -> ARB
+            @(negedge clk);
+            stuff_error = 1'b1;
+            @(negedge clk);
+            stuff_error = 1'b0;
+            @(negedge clk);
+            check_state("T34-err_entry  entered ERROR_FRAME as passive node", ST_ERROR_FRAME);
+
+            // In ERROR_PASSIVE, all 6 bits of the error flag must be RECESSIVE with tx_en=0!
+            for (t34_err_idx = 0; t34_err_idx < 6; t34_err_idx = t34_err_idx + 1) begin
+                @(negedge clk);
+                tests = tests + 1;
+                if (tx_en !== 1'b0 || tx_bit_out !== 1'b1) begin
+                    $display("[FAIL] T34-flag[%0d]  expected passive flag (en=0, bit=1) got en=%b bit=%b",
+                             t34_err_idx, tx_en, tx_bit_out);
+                    errors = errors + 1;
+                end else begin
+                    $display("[PASS] T34-flag[%0d]  passive error flag bit %0d is recessive (en=0 bit=1)",
+                             t34_err_idx, t34_err_idx);
+                end
+                tick();
+            end
+
+            // Step remaining 8 delimiter ticks to IFS
+            tick_n(8);
+            check_state("T34-delim_end  completed passive error frame -> IFS", ST_IFS);
+            tick_n(3);
+            check_state("T34-idle  returned to IDLE", ST_IDLE);
+        end
+
+        // ==================================================================
+        // T35 -- Day 24: Bus-Off State & Recovery in BSP FSM
+        // When node accumulates TEC > 255:
+        //   - Node enters BUS_OFF (bus_off=1, node_state=2)
+        //   - tx_en is disabled (0)
+        //   - tx_request in IDLE is ignored (remains in IDLE)
+        //   - bus_off_recovery restores node to ERROR_ACTIVE (tec=0, rec=0)
+        // ==================================================================
+        begin : T35_bus_off
+            int t35_err_idx;
+            for (t35_err_idx = 0; t35_err_idx < 16; t35_err_idx = t35_err_idx + 1) begin
+                tx_id      = 11'h1A5;
+                tx_dlc     = 4'd0;
+                tx_request = 1'b1;
+                @(negedge clk);
+                tx_request = 1'b0;
+                tick(); // -> ARB
+                @(negedge clk);
+                stuff_error = 1'b1;
+                @(negedge clk);
+                stuff_error = 1'b0;
+                tick_n(14); tick_n(3);
+            end
+
+            // Verify node is in BUS_OFF
+            @(negedge clk);
+            tests = tests + 1;
+            if (bus_off_out !== 1'b1 || node_state_out !== 2'b10) begin
+                $display("[FAIL] T35-bus_off  expected BUS_OFF (state=2), got tec=%0d state=%0d bo=%b",
+                         tec_out, node_state_out, bus_off_out);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T35-bus_off  node successfully entered BUS_OFF (tec=%0d)", tec_out);
+            end
+
+            // While in Bus-Off, assert tx_request: node must ignore it and stay in IDLE
+            tx_request = 1'b1;
+            @(negedge clk);
+            @(negedge clk);
+            tests = tests + 1;
+            if (state_out !== ST_IDLE || tx_en !== 1'b0) begin
+                $display("[FAIL] T35-ignore_tx  expected IDLE with tx_en=0, got state=%0d en=%b",
+                         state_out, tx_en);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T35-ignore_tx  tx_request ignored while in BUS_OFF (stayed in IDLE, tx_en=0)");
+            end
+            tx_request = 1'b0;
+
+            // Trigger bus-off recovery
+            @(negedge clk);
+            bus_off_recovery = 1'b1;
+            @(negedge clk);
+            bus_off_recovery = 1'b0;
+            @(negedge clk);
+
+            tests = tests + 1;
+            if (bus_off_out !== 1'b0 || node_state_out !== 2'b00 || tec_out !== 8'd0 || rec_out !== 8'd0) begin
+                $display("[FAIL] T35-recovery  expected ERROR_ACTIVE with tec=0 rec=0, got state=%0d tec=%0d rec=%0d",
+                         node_state_out, tec_out, rec_out);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T35-recovery  bus_off_recovery restored node to ERROR_ACTIVE (tec=0, rec=0)");
+            end
+
+            // Verify node can now transmit again
+            tx_id      = 11'h1A5;
+            tx_dlc     = 4'd0;
+            tx_request = 1'b1;
+            @(negedge clk);
+            tests = tests + 1;
+            if (state_out !== ST_SOF) begin
+                $display("[FAIL] T35-resume_tx  expected SOF after recovery, got state=%0d", state_out);
+                errors = errors + 1;
+            end else begin
+                $display("[PASS] T35-resume_tx  node successfully initiated frame after recovery -> SOF");
+            end
+            tx_request = 1'b0;
+            // Clean up back to IDLE
+            tick_n(36); // to ACK
+            @(negedge clk);
+            rx_bit       = 1'b0;
+            sample_point = 1'b1;
+            @(negedge clk);
+            sample_point = 1'b0;
+            rx_bit       = 1'b1;
+            tick_n(2); // ACK -> EOF
+            tick_n(7); // EOF -> IFS
+            tick_n(3); // IFS -> IDLE
+            check_state("T35-end  cleanly returned to IDLE", ST_IDLE);
+        end
 
         // ==================================================================
         // Summary

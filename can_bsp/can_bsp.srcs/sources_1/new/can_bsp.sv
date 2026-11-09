@@ -3,7 +3,14 @@
 // Description : Frame-level FSM for a Classical CAN 2.0A controller
 //               (standard frames only, 11-bit base ID).
 //
-// Implementation status (Days 10-19):
+// Implementation status (Days 10-24):
+//   DONE : EML Integration -- Day 24: Integrated CAN Error Management Logic (can_eml).
+//                        - Tracks Transmit Error Counter (TEC) and Receive Error Counter (REC).
+//                        - Error containment states: ERROR_ACTIVE, ERROR_PASSIVE, BUS_OFF.
+//                        - Drives Active Error Flag (6 dominant) when error_active.
+//                        - Drives Passive Error Flag (6 recessive) when error_passive.
+//                        - Shuts down bus drive (tx_en=0) and ignores tx_request when bus_off.
+//                        - Supports bus_off_recovery input.
 //   DONE : SOF, ARBITRATION, CONTROL -- TX serialisation + bit stuffing + arb
 //   DONE : DATA field -- TX serialisation from data_shift, stuffing enabled
 //   DONE : CRC_FIELD  -- transmits 15-bit CRC-15 sequence + 1-bit delimiter
@@ -104,6 +111,7 @@ module can_bsp (
     // Error inputs
     input  logic        stuff_error, // stuffing violation input
     input  logic        crc_ok,      // CRC correct (RX path)
+    input  logic        bus_off_recovery = 1'b0, // Recovery strobe (Day 24)
 
     // Outputs
     output logic        tx_bit,        // bit to drive on bus (held between ticks)
@@ -115,7 +123,16 @@ module can_bsp (
     output logic        rx_data_valid, // 1-clk pulse: rx_data_bit is valid protocol bit (Day 19)
     output logic        rx_stuff_error,// 1-clk pulse: destuffer error detected (Day 19)
     output logic        error_out,     // 1-clk error pulse
-    output logic [3:0]  state_out      // numeric state for debug
+    output logic [3:0]  state_out,     // numeric state for debug
+
+    // EML status outputs (Day 24)
+    output logic [7:0]  tec,           // Transmit Error Counter
+    output logic [7:0]  rec,           // Receive Error Counter
+    output logic [1:0]  node_state,    // 00=Active, 01=Passive, 10=Bus-Off
+    output logic        error_active,  // 1 when node is Error-Active
+    output logic        error_passive, // 1 when node is Error-Passive
+    output logic        bus_off,       // 1 when node is Bus-Off
+    output logic        error_warning  // 1 when TEC >= 96 or REC >= 96
 );
 
     // =========================================================================
@@ -316,6 +333,51 @@ module can_bsp (
     );
 
     // =========================================================================
+    // Error Management Logic (EML) instantiation (Day 24)
+    // =========================================================================
+    // Bit Error: transmitter actively driving but samples unexpected bit level.
+    // Excluded during arbitration (except when driving 0 and sampling 1), ACK slot, and ERROR_FRAME.
+    wire bit_err_detected = sample_point && transmitting && tx_en && (tx_bit != rx_bit) &&
+                            (state != ARBITRATION || (tx_bit == 1'b0 && rx_bit == 1'b1)) &&
+                            (state != ACK) &&
+                            (state != ERROR_FRAME);
+
+    // CRC Error: receiver detects CRC mismatch at end of ACK delimiter/slot
+    wire crc_err_detected = (state == ACK) && bit_tick && (bit_cnt >= (LEN_ACK - 1)) &&
+                            !transmitting && !crc_ok && !ack_delim_err;
+
+    // ACK Error: transmitter does not receive dominant ACK in ACK slot
+    wire ack_err_detected = (state == ACK) && bit_tick && (bit_cnt >= (LEN_ACK - 1)) &&
+                            transmitting && ack_err_reg && !ack_delim_err;
+
+    // Successful frame completion (EOF end reached without error)
+    wire frame_done_success = (state == EOF) && bit_tick && (bit_cnt >= (LEN_EOF - 1)) && !eof_form_err;
+    wire eml_tx_success     = frame_done_success && transmitting;
+    wire eml_rx_success     = frame_done_success && !transmitting;
+
+    can_eml u_eml (
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .clear            (clear),
+        .is_transmitter   (transmitting),
+        .bit_error        (bit_err_detected),
+        .stuff_error      (effective_stuff_error),
+        .crc_error        (crc_err_detected),
+        .ack_error        (ack_err_detected),
+        .form_error       (form_err_detected),
+        .tx_success       (eml_tx_success),
+        .rx_success       (eml_rx_success),
+        .bus_off_recovery (bus_off_recovery),
+        .tec              (tec),
+        .rec              (rec),
+        .node_state       (node_state),
+        .error_active     (error_active),
+        .error_passive    (error_passive),
+        .bus_off          (bus_off),
+        .error_warning    (error_warning)
+    );
+
+    // =========================================================================
     // State and shift registers
     // =========================================================================
     always_ff @(posedge clk or negedge rst_n) begin
@@ -460,7 +522,7 @@ module can_bsp (
 
             // ------------------------------------------------------------------
             IDLE: begin
-                if (tx_request || (!rx_bit && sample_point))
+                if (!bus_off && (tx_request || (!rx_bit && sample_point)))
                     next_state = SOF;
             end
 
@@ -554,7 +616,7 @@ module can_bsp (
         // ----------------------------------------------------------------------
         // Error override: any immediate error triggers ERROR_FRAME
         // ----------------------------------------------------------------------
-        if (effective_stuff_error || form_err_detected || ifs_overload_err)
+        if (effective_stuff_error || form_err_detected || ifs_overload_err || bit_err_detected)
             next_state = ERROR_FRAME;
     end
 
@@ -586,7 +648,7 @@ module can_bsp (
                                       ? 1'b0             // RX drives dominant in ACK slot if CRC ok
                                       : 1'b1;            // TX and delimiter drive recessive
             EOF:         raw_tx_bit = 1'b1;              // 7 recessive bits
-            ERROR_FRAME: raw_tx_bit = (bit_cnt < 7'd6)   // 6 dominant flag, 8 recessive delimiter
+            ERROR_FRAME: raw_tx_bit = (error_active && (bit_cnt < 7'd6))
                                       ? 1'b0
                                       : 1'b1;
             IFS:         raw_tx_bit = 1'b1;              // 3 recessive intermission bits
@@ -607,12 +669,14 @@ module can_bsp (
     // When transmitting standard frame fields: drive as long as arbitration is not lost.
     // When receiver in ACK slot with valid CRC: actively drive dominant ACK bit.
     // In EOF, IFS, and IDLE: bus is released / recessive (tx_en = 0).
-    assign tx_en = (state == ERROR_FRAME) ? (bit_cnt < 7'd6) :
+    assign tx_en = !bus_off && (
+                   ((state == ERROR_FRAME) ? (error_active && (bit_cnt < 7'd6)) :
                    (!arb_lost && (state == SOF         ||
                                   state == ARBITRATION ||
                                   state == CONTROL     ||
                                   state == DATA        ||
                                   state == CRC_FIELD)) ||
-                   (!transmitting && (state == ACK) && (bit_cnt == 7'd0) && crc_ok);
+                   (!transmitting && (state == ACK) && (bit_cnt == 7'd0) && crc_ok))
+                   );
 
 endmodule
