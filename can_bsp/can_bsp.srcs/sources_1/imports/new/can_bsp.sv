@@ -112,6 +112,7 @@ module can_bsp (
     input  logic        stuff_error, // stuffing violation input
     input  logic        crc_ok,      // CRC correct (RX path)
     input  logic        bus_off_recovery = 1'b0, // Recovery strobe (Day 24)
+    input  logic        loopback         = 1'b0, // Loopback self-test mode (Day 27-28)
 
     // Outputs
     output logic        tx_bit,        // bit to drive on bus (held between ticks)
@@ -124,6 +125,8 @@ module can_bsp (
     output logic        rx_stuff_error,// 1-clk pulse: destuffer error detected (Day 19)
     output logic        error_out,     // 1-clk error pulse
     output logic [3:0]  state_out,     // numeric state for debug
+    output logic        tx_success,    // 1-clk pulse on successful frame TX
+    output logic        rx_success,    // 1-clk pulse on successful frame RX
 
     // EML status outputs (Day 24)
     output logic [7:0]  tec,           // Transmit Error Counter
@@ -260,14 +263,20 @@ module can_bsp (
     // When stuffing is disabled (CRC_FIELD, ACK, EOF, IFS, ERROR_FRAME), matches bit_tick.
     wire proto_tick = stuff_en ? stuffer_ready : bit_tick;
 
+    // Clear stuffer / destuffer on synchronous abort or whenever frame starts/restarts
+    wire destuff_clear = clear || (state == IDLE && next_state == SOF)
+                               || (state == IFS  && next_state == SOF)
+                               || (state == EOF  && next_state == SOF);
+
     can_bit_stuffer u_stuffer (
         .clk           (clk),
         .rst_n         (rst_n),
-        .clear         (clear),
+        .clear         (destuff_clear),
         .bit_tick      (bit_tick),
+        .sample_point  (sample_point),
         .stuff_en      (stuff_en),
         .data_valid    (1'b1),
-        .bit_in        (raw_tx_bit),
+        .bit_in        (tx_bit),
         .ready         (stuffer_ready),
         .stuff_pending (stuff_pending),
         .bit_out       (stuffer_bit_out),
@@ -286,13 +295,7 @@ module can_bsp (
     assign destuff_en = (state == SOF) ||
                         (state == ARBITRATION) ||
                         (state == CONTROL) ||
-                        (state == DATA) ||
-                        ((state == CRC_FIELD) && (bit_cnt < 7'd15));
-
-    // Clear destuffer on synchronous abort or whenever frame starts/restarts
-    wire destuff_clear = clear || (state == IDLE && next_state == SOF)
-                               || (state == IFS  && next_state == SOF)
-                               || (state == EOF  && next_state == SOF);
+                        (state == DATA);
 
     can_bit_destuffer u_destuffer (
         .clk            (clk),
@@ -338,6 +341,7 @@ module can_bsp (
     // Bit Error: transmitter actively driving but samples unexpected bit level.
     // Excluded during arbitration (except when driving 0 and sampling 1), ACK slot, and ERROR_FRAME.
     wire bit_err_detected = sample_point && transmitting && tx_en && (tx_bit != rx_bit) &&
+                            (state != SOF) &&
                             (state != ARBITRATION || (tx_bit == 1'b0 && rx_bit == 1'b1)) &&
                             (state != ACK) &&
                             (state != ERROR_FRAME);
@@ -347,13 +351,17 @@ module can_bsp (
                             !transmitting && !crc_ok && !ack_delim_err;
 
     // ACK Error: transmitter does not receive dominant ACK in ACK slot
+    // In loopback mode, ACK is automatically satisfied
     wire ack_err_detected = (state == ACK) && bit_tick && (bit_cnt >= (LEN_ACK - 1)) &&
-                            transmitting && ack_err_reg && !ack_delim_err;
+                            transmitting && ack_err_reg && !ack_delim_err && !loopback;
 
     // Successful frame completion (EOF end reached without error)
     wire frame_done_success = (state == EOF) && bit_tick && (bit_cnt >= (LEN_EOF - 1)) && !eof_form_err;
     wire eml_tx_success     = frame_done_success && transmitting;
     wire eml_rx_success     = frame_done_success && !transmitting;
+
+    assign tx_success       = eml_tx_success;
+    assign rx_success       = eml_rx_success;
 
     can_eml u_eml (
         .clk              (clk),
@@ -501,7 +509,7 @@ module can_bsp (
             // dominant (rx_bit == 0). If rx_bit == 1, no receiver acknowledged.
             // -----------------------------------------------------------------
             if (state == ACK && bit_cnt == 7'd0 && sample_point && transmitting) begin
-                if (rx_bit == 1'b0) begin
+                if (rx_bit == 1'b0 || loopback) begin
                     ack_received <= 1'b1;
                     ack_err_reg  <= 1'b0;
                 end else begin
@@ -564,7 +572,7 @@ module can_bsp (
                 if (ack_delim_err) begin
                     next_state = ERROR_FRAME;
                 end else if (bit_tick && bit_cnt >= (LEN_ACK - 1)) begin
-                    if (transmitting && ack_err_reg)
+                    if (transmitting && ack_err_reg && !loopback)
                         next_state = ERROR_FRAME;
                     else if (!transmitting && !crc_ok)
                         next_state = ERROR_FRAME;
@@ -657,12 +665,9 @@ module can_bsp (
     end
 
     // Actual bus bit driven:
-    // During non-stuffed states (ACK, EOF, IFS, ERROR_FRAME), bypass stuffer register
-    // to keep bus level and enable in exact cycle-accurate phase.
-    // In stuffed protocol states, drive from stuffer.
-    assign tx_bit = (state == ACK || state == EOF || state == IFS || state == ERROR_FRAME)
-                  ? raw_tx_bit
-                  : stuffer_bit_out;
+    // During stuffing: actively drive complementary stuff bit.
+    // Otherwise: drive raw_tx_bit.
+    assign tx_bit = (stuff_en && stuffing_active) ? stuffer_bit_out : raw_tx_bit;
 
     // Bus drive enable:
     // When ERROR_FRAME: actively drive dominant for first 6 bits (error flag), release during delimiter.

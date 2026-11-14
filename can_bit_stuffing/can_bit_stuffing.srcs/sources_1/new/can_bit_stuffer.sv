@@ -31,6 +31,7 @@ module can_bit_stuffer (
     input  logic rst_n,
     input  logic clear,          // sync abort / re-init
     input  logic bit_tick,       // 1-clk strobe, once per bit time
+    input  logic sample_point,   // 1-clk strobe at sample point
     input  logic stuff_en,       // 1 = stuffing active
     input  logic data_valid,     // BSP has a bit on bit_in
     input  logic bit_in,         // raw protocol bit
@@ -46,56 +47,66 @@ module can_bit_stuffer (
 
     assign ready = bit_tick & ~stuff_pending;
 
+    // Consecutive run tracking at sample point
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             same_count    <= 3'd0;
-            last_bit      <= 1'b1;   // idle bus = recessive
-            bit_out       <= 1'b1;
-            bit_out_valid <= 1'b0;
-            stuffing      <= 1'b0;
+            last_bit      <= 1'b1;
             stuff_pending <= 1'b0;
         end else if (clear) begin
             same_count    <= 3'd0;
             last_bit      <= 1'b1;
-            bit_out       <= 1'b1;
-            bit_out_valid <= 1'b0;
-            stuffing      <= 1'b0;
             stuff_pending <= 1'b0;
         end else begin
-            bit_out_valid <= 1'b0;
-
-            // Stuffing disabled and nothing owed: keep run tracker clean.
             if (!stuff_en && !stuff_pending) begin
                 same_count <= 3'd0;
                 last_bit   <= 1'b1;
             end
 
+            if (sample_point && stuff_en) begin
+                if (stuffing) begin
+                    same_count    <= 3'd1;
+                    last_bit      <= bit_in;
+                    stuff_pending <= 1'b0;
+                end else begin
+                    last_bit <= bit_in;
+                    if (bit_in == last_bit) begin
+                        if (same_count == 3'd4) begin
+                            stuff_pending <= 1'b1;
+                            same_count    <= 3'd5;
+                        end else begin
+                            same_count <= same_count + 3'd1;
+                        end
+                    end else begin
+                        same_count <= 3'd1;
+                    end
+                end
+            end
+        end
+    end
+
+    // Bus drive updates at bit_tick
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            bit_out       <= 1'b1;
+            bit_out_valid <= 1'b0;
+            stuffing      <= 1'b0;
+        end else if (clear) begin
+            bit_out       <= 1'b0;
+            bit_out_valid <= 1'b0;
+            stuffing      <= 1'b0;
+        end else begin
+            bit_out_valid <= 1'b0;
+
             if (bit_tick) begin
                 if (stuff_pending) begin
-                    // Owed stuff bit: sent regardless of stuff_en / data_valid.
                     bit_out       <= ~last_bit;
-                    last_bit      <= ~last_bit;
-                    same_count    <= 3'd1;      // stuff bit starts a new run
-                    stuff_pending <= 1'b0;
                     stuffing      <= 1'b1;
                     bit_out_valid <= 1'b1;
-                end else if (data_valid) begin
+                end else begin
                     bit_out       <= bit_in;
                     stuffing      <= 1'b0;
                     bit_out_valid <= 1'b1;
-                    if (stuff_en) begin
-                        last_bit <= bit_in;
-                        if (bit_in == last_bit) begin
-                            if (same_count == 3'd4) begin
-                                stuff_pending <= 1'b1;   // this was the 5th
-                                same_count    <= 3'd5;
-                            end else begin
-                                same_count <= same_count + 3'd1;
-                            end
-                        end else begin
-                            same_count <= 3'd1;
-                        end
-                    end
                 end
             end
         end
