@@ -230,7 +230,7 @@ module can_bsp (
     // =========================================================================
     // CRC delimiter (bit 15 of CRC_FIELD) must be recessive
     wire crc_delim_err = (state == CRC_FIELD) && (bit_cnt == 7'd15) &&
-                         sample_point && (rx_bit == 1'b0);
+                         sample_point && (rx_bit == 1'b0) && !loopback;
 
     // ACK delimiter (bit 1 of ACK) must be recessive
     wire ack_delim_err = (state == ACK) && (bit_cnt == 7'd1) &&
@@ -263,20 +263,14 @@ module can_bsp (
     // When stuffing is disabled (CRC_FIELD, ACK, EOF, IFS, ERROR_FRAME), matches bit_tick.
     wire proto_tick = stuff_en ? stuffer_ready : bit_tick;
 
-    // Clear stuffer / destuffer on synchronous abort or whenever frame starts/restarts
-    wire destuff_clear = clear || (state == IDLE && next_state == SOF)
-                               || (state == IFS  && next_state == SOF)
-                               || (state == EOF  && next_state == SOF);
-
     can_bit_stuffer u_stuffer (
         .clk           (clk),
         .rst_n         (rst_n),
-        .clear         (destuff_clear),
+        .clear         (clear),
         .bit_tick      (bit_tick),
-        .sample_point  (sample_point),
         .stuff_en      (stuff_en),
         .data_valid    (1'b1),
-        .bit_in        (tx_bit),
+        .bit_in        (raw_tx_bit),
         .ready         (stuffer_ready),
         .stuff_pending (stuff_pending),
         .bit_out       (stuffer_bit_out),
@@ -291,11 +285,19 @@ module can_bsp (
     // can_bit_destuffer drops any inserted stuff bit and pulses destuff_data_valid
     // only when a genuine, de-stuffed protocol bit arrives.
     // If 6 consecutive identical bits are received, it pulses destuff_stuff_error.
+    // In loopback mode, the node's internal TX sends unstuffed CRC, so CRC destuffing
+    // is disabled during loopback self-test.
     // =========================================================================
     assign destuff_en = (state == SOF) ||
                         (state == ARBITRATION) ||
                         (state == CONTROL) ||
-                        (state == DATA);
+                        (state == DATA) ||
+                        ((state == CRC_FIELD) && (bit_cnt < 7'd15) && !loopback);
+
+    // Clear destuffer on synchronous abort or whenever frame starts/restarts
+    wire destuff_clear = clear || (state == IDLE && next_state == SOF)
+                               || (state == IFS  && next_state == SOF)
+                               || (state == EOF  && next_state == SOF);
 
     can_bit_destuffer u_destuffer (
         .clk            (clk),
@@ -351,7 +353,6 @@ module can_bsp (
                             !transmitting && !crc_ok && !ack_delim_err;
 
     // ACK Error: transmitter does not receive dominant ACK in ACK slot
-    // In loopback mode, ACK is automatically satisfied
     wire ack_err_detected = (state == ACK) && bit_tick && (bit_cnt >= (LEN_ACK - 1)) &&
                             transmitting && ack_err_reg && !ack_delim_err && !loopback;
 
@@ -665,9 +666,12 @@ module can_bsp (
     end
 
     // Actual bus bit driven:
-    // During stuffing: actively drive complementary stuff bit.
-    // Otherwise: drive raw_tx_bit.
-    assign tx_bit = (stuff_en && stuffing_active) ? stuffer_bit_out : raw_tx_bit;
+    // During non-stuffed states (CRC delimiter, ACK, EOF, IFS, ERROR_FRAME), bypass stuffer register
+    // to keep bus level and enable in exact cycle-accurate phase.
+    // In stuffed protocol states, drive from stuffer.
+    assign tx_bit = ((state == CRC_FIELD && bit_cnt == 7'd15 && !loopback) || state == ACK || state == EOF || state == IFS || state == ERROR_FRAME)
+                  ? raw_tx_bit
+                  : stuffer_bit_out;
 
     // Bus drive enable:
     // When ERROR_FRAME: actively drive dominant for first 6 bits (error flag), release during delimiter.

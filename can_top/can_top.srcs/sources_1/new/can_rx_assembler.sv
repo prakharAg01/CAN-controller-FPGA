@@ -50,37 +50,32 @@ module can_rx_assembler (
     localparam [3:0] ST_IFS         = 4'd8;
     localparam [3:0] ST_ERROR_FRAME = 4'd9;
 
-    // Internal deserialization shift registers & counters
+    // Internal deserialization shift registers & bit counter
+    logic        in_frame;
+    logic [6:0]  rx_bit_cnt;
     logic [10:0] id_shift;
     logic        rtr_reg;
-    logic [3:0]  arb_cnt;
-    logic [3:0]  ctrl_cnt;
     logic [3:0]  dlc_reg;
     logic [63:0] data_shift;
-    logic [5:0]  data_bit_cnt;
     logic [14:0] crc_rx_shift;
-    logic [3:0]  crc_rx_cnt;
+
+    // Payload bit length calculation based on latched DLC (capped at 8 bytes = 64 bits)
+    wire [3:0] effective_dlc = (dlc_reg > 4'd8) ? 4'd8 : dlc_reg;
+    wire [6:0] data_bit_len  = {effective_dlc, 3'b000}; // dlc * 8
 
     // CRC calculator instance for RX path
     logic        crc_init;
     logic        crc_calc_en;
     logic [14:0] crc_computed;
 
-    // Pulse crc_init on entry into SOF (1-clk strobe)
-    logic        prev_sof;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) prev_sof <= 1'b0;
-        else        prev_sof <= (bsp_state == ST_SOF);
-    end
-    wire sof_start_pulse = (bsp_state == ST_SOF) && !prev_sof;
-    assign crc_init      = clear || sof_start_pulse;
+    // Initialize CRC when idle or error
+    assign crc_init = clear || (bsp_state == ST_IDLE) || (bsp_state == ST_ERROR_FRAME);
 
-    // Calculate CRC over SOF, ARBITRATION, CONTROL, and DATA fields
+    // Calculate CRC over SOF (bit 0), ID (1..11), RTR (12), IDE/r0 (13..14), DLC (15..18), and DATA
+    // Total header bits = 19 bits (0..18). Total covered bits = 19 + data_bit_len.
     assign crc_calc_en = rx_data_valid && (
-        (bsp_state == ST_SOF)         ||
-        (bsp_state == ST_ARBITRATION) ||
-        (bsp_state == ST_CONTROL)     ||
-        (bsp_state == ST_DATA)
+        (!in_frame && (rx_data_bit == 1'b0)) ||
+        (in_frame && (rx_bit_cnt < (7'd19 + data_bit_len)))
     );
 
     can_crc u_rx_crc (
@@ -95,75 +90,66 @@ module can_rx_assembler (
     // Deserialization Logic
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            in_frame     <= 1'b0;
+            rx_bit_cnt   <= 7'd0;
             id_shift     <= 11'd0;
             rtr_reg      <= 1'b0;
-            arb_cnt      <= 4'd0;
-            ctrl_cnt     <= 4'd0;
             dlc_reg      <= 4'd0;
             data_shift   <= 64'd0;
-            data_bit_cnt <= 6'd0;
             crc_rx_shift <= 15'd0;
-            crc_rx_cnt   <= 4'd0;
-        end else if (clear || (bsp_state == ST_IDLE) || (bsp_state == ST_ERROR_FRAME)) begin
-            arb_cnt      <= 4'd0;
-            ctrl_cnt     <= 4'd0;
-            data_bit_cnt <= 6'd0;
-            crc_rx_cnt   <= 4'd0;
-        end else begin
-            // State-specific counter resets when outside that state
-            if (bsp_state != ST_ARBITRATION) arb_cnt <= 4'd0;
-            if (bsp_state != ST_CONTROL)     ctrl_cnt <= 4'd0;
-            if (bsp_state != ST_CRC_FIELD)   crc_rx_cnt <= 4'd0;
+        end else if (clear || (bsp_state == ST_IDLE) || (bsp_state == ST_ERROR_FRAME) || frame_valid) begin
+            in_frame     <= 1'b0;
+            rx_bit_cnt   <= 7'd0;
+            id_shift     <= 11'd0;
+            rtr_reg      <= 1'b0;
+            dlc_reg      <= 4'd0;
+            data_shift   <= 64'd0;
+            crc_rx_shift <= 15'd0;
+        end else if (rx_data_valid) begin
+            if (!in_frame) begin
+                // Frame begins on the first dominant (0) bit (SOF)
+                if (rx_data_bit == 1'b0) begin
+                    in_frame   <= 1'b1;
+                    rx_bit_cnt <= 7'd1; // Next expected bit is ID[10] (bit 1)
+                end
+            end else begin
+                // Bits 1..11: Base Identifier ID[10..0] (11 bits)
+                if (rx_bit_cnt >= 7'd1 && rx_bit_cnt <= 7'd11) begin
+                    id_shift <= {id_shift[9:0], rx_data_bit};
+                end
+                // Bit 12: RTR bit
+                else if (rx_bit_cnt == 7'd12) begin
+                    rtr_reg <= rx_data_bit;
+                end
+                // Bits 13..14: IDE (bit 13) and r0 (bit 14)
+                else if (rx_bit_cnt == 7'd13 || rx_bit_cnt == 7'd14) begin
+                    // Reserved/control bits
+                end
+                // Bits 15..18: Data Length Code DLC[3..0] (4 bits)
+                else if (rx_bit_cnt >= 7'd15 && rx_bit_cnt <= 7'd18) begin
+                    dlc_reg <= {dlc_reg[2:0], rx_data_bit};
+                end
+                // Bits 19..(19 + data_bit_len - 1): Data Payload
+                else if (rx_bit_cnt >= 7'd19 && rx_bit_cnt < (7'd19 + data_bit_len)) begin
+                    data_shift <= {data_shift[62:0], rx_data_bit};
+                end
+                // Next 15 bits: Received CRC sequence
+                else if (rx_bit_cnt >= (7'd19 + data_bit_len) && rx_bit_cnt < (7'd19 + data_bit_len + 7'd15)) begin
+                    crc_rx_shift <= {crc_rx_shift[13:0], rx_data_bit};
+                end
 
-            if (rx_data_valid) begin
-                case (bsp_state)
-                    ST_ARBITRATION: begin
-                        // 12 bits: 11-bit ID (bits 0..10) + 1-bit RTR (bit 11)
-                        if (arb_cnt < 4'd11) begin
-                            id_shift <= {id_shift[9:0], rx_data_bit};
-                        end else begin
-                            rtr_reg  <= rx_data_bit;
-                        end
-                        arb_cnt <= arb_cnt + 1'b1;
-                    end
-
-                    ST_CONTROL: begin
-                        // 6 bits: IDE (bit 0), r0 (bit 1), DLC[3:0] (bits 2..5)
-                        ctrl_cnt <= ctrl_cnt + 1'b1;
-                        if (ctrl_cnt >= 4'd2) begin
-                            dlc_reg <= {dlc_reg[2:0], rx_data_bit};
-                        end
-                        data_bit_cnt <= 6'd0; // reset for data field
-                    end
-
-                    ST_DATA: begin
-                        // Shift in data bytes MSB first into bits [63:0]
-                        data_shift   <= {data_shift[62:0], rx_data_bit};
-                        data_bit_cnt <= data_bit_cnt + 1'b1;
-                    end
-
-                    ST_CRC_FIELD: begin
-                        // First 15 bits are CRC sequence
-                        if (crc_rx_cnt < 4'd15) begin
-                            crc_rx_shift <= {crc_rx_shift[13:0], rx_data_bit};
-                            crc_rx_cnt   <= crc_rx_cnt + 1'b1;
-                        end
-                    end
-
-                    default: ;
-                endcase
+                rx_bit_cnt <= rx_bit_cnt + 1'b1;
             end
         end
     end
 
-    // CRC Comparison: Check if computed CRC matches received CRC
-    // Valid during ACK and EOF states
+    // CRC Comparison: Check if computed CRC matches received CRC sequence
     assign crc_ok = (crc_computed == crc_rx_shift);
 
     // Left-justify data payload if DLC < 8 so Byte 0 is always at [63:56]
     logic [63:0] aligned_data;
     always_comb begin
-        case (dlc_reg)
+        case (effective_dlc)
             4'd0: aligned_data = 64'd0;
             4'd1: aligned_data = {data_shift[7:0],  56'd0};
             4'd2: aligned_data = {data_shift[15:0], 48'd0};
@@ -179,7 +165,7 @@ module can_rx_assembler (
     // Outputs
     assign rx_id   = id_shift;
     assign rx_rtr  = rtr_reg;
-    assign rx_dlc  = (dlc_reg > 4'd8) ? 4'd8 : dlc_reg;
+    assign rx_dlc  = effective_dlc;
     assign rx_data = aligned_data;
 
     // Push into RX FIFO upon successful frame completion
