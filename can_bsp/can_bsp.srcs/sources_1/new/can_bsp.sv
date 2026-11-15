@@ -101,6 +101,7 @@ module can_bsp (
     input  logic        bit_tick,    // 1-clk strobe, once per CAN bit time
     input  logic        sample_point,// 1-clk strobe at sample point
     input  logic        rx_bit,      // bus bit captured at sample point
+    input  logic        hard_sync = 1'b0, // 1-clk strobe on SOF falling edge in IDLE (Day 29-30)
 
     // Host / TX buffer interface
     input  logic        tx_request,  // host has a frame ready to send
@@ -125,6 +126,7 @@ module can_bsp (
     output logic        rx_stuff_error,// 1-clk pulse: destuffer error detected (Day 19)
     output logic        error_out,     // 1-clk error pulse
     output logic [3:0]  state_out,     // numeric state for debug
+    output logic        wait_for_sof,  // 1 = IDLE or IFS bit 2: ready for hard sync
     output logic        tx_success,    // 1-clk pulse on successful frame TX
     output logic        rx_success,    // 1-clk pulse on successful frame RX
 
@@ -179,6 +181,7 @@ module can_bsp (
     logic        transmitting; // 1 = transmitter (tx_request); 0 = receiver / listener
     logic        ack_received; // 1 = dominant ACK bit sampled in ACK slot
     logic        ack_err_reg;  // 1 = transmitter sampled recessive in ACK slot
+    logic [3:0]  rx_dlc_shift; // Received DLC shift register for receiver mode
 
     assign ack_error = ack_err_reg;
 
@@ -204,6 +207,8 @@ module can_bsp (
     assign rx_data_bit    = destuff_bit_out;
     assign rx_data_valid  = destuff_data_valid;
     assign rx_stuff_error = destuff_stuff_error;
+
+    wire  [3:0]  active_ctrl_dlc = transmitting ? dlc_latch : {rx_dlc_shift[2:0], destuff_bit_out};
 
     // Combined stuff error: internal destuffer violation OR external stuff_error input
     wire effective_stuff_error = stuff_error || destuff_stuff_error;
@@ -253,20 +258,26 @@ module can_bsp (
 
     // =========================================================================
     // Bit stuffer instantiation (TX path)
-    // Active during SOF, ARBITRATION, CONTROL, and DATA.
-    // CRC_FIELD: no stuffing (per CAN 2.0A, stuffing ends after the data field).
+    // Active during SOF, ARBITRATION, CONTROL, DATA, and CRC_FIELD (bits 0..14).
+    // CRC delimiter (bit 15) and beyond: no stuffing per CAN 2.0A.
     // =========================================================================
     assign stuff_en = (state == SOF) || (state == ARBITRATION) ||
-                      (state == CONTROL) || (state == DATA);
+                      (state == CONTROL) || (state == DATA) ||
+                      ((state == CRC_FIELD) && (bit_cnt < 7'd15));
 
-    // Protocol tick: strobe when a real protocol bit is consumed by the stuffer.
-    // When stuffing is disabled (CRC_FIELD, ACK, EOF, IFS, ERROR_FRAME), matches bit_tick.
-    wire proto_tick = stuff_en ? stuffer_ready : bit_tick;
+    // Protocol tick: strobe when a real protocol bit is consumed by the stuffer/destuffer.
+    // When stuffing is disabled (CRC delimiter, ACK, EOF, IFS, ERROR_FRAME), matches bit_tick.
+    wire proto_tick = transmitting ? (stuff_en ? stuffer_ready : bit_tick)
+                                   : (destuff_en ? destuff_data_valid : bit_tick);
+
+    wire stuffer_clear = clear || (state == IDLE && next_state == SOF)
+                               || (state == IFS  && next_state == SOF)
+                               || (state == EOF  && next_state == SOF);
 
     can_bit_stuffer u_stuffer (
         .clk           (clk),
         .rst_n         (rst_n),
-        .clear         (clear),
+        .clear         (stuffer_clear),
         .bit_tick      (bit_tick),
         .stuff_en      (stuff_en),
         .data_valid    (1'b1),
@@ -285,14 +296,12 @@ module can_bsp (
     // can_bit_destuffer drops any inserted stuff bit and pulses destuff_data_valid
     // only when a genuine, de-stuffed protocol bit arrives.
     // If 6 consecutive identical bits are received, it pulses destuff_stuff_error.
-    // In loopback mode, the node's internal TX sends unstuffed CRC, so CRC destuffing
-    // is disabled during loopback self-test.
     // =========================================================================
     assign destuff_en = (state == SOF) ||
                         (state == ARBITRATION) ||
                         (state == CONTROL) ||
                         (state == DATA) ||
-                        ((state == CRC_FIELD) && (bit_cnt < 7'd15) && !loopback);
+                        ((state == CRC_FIELD) && (bit_cnt < 7'd15));
 
     // Clear destuffer on synchronous abort or whenever frame starts/restarts
     wire destuff_clear = clear || (state == IDLE && next_state == SOF)
@@ -398,6 +407,7 @@ module can_bsp (
             data_bits    <= 7'd0;
             arb_shift    <= 12'd0;
             ctrl_shift   <= 6'd0;
+            rx_dlc_shift <= 4'd0;
             data_shift   <= 64'd0;
             crc_shift    <= 15'd0;
             crc_latched  <= 1'b0;
@@ -414,6 +424,7 @@ module can_bsp (
             data_bits    <= 7'd0;
             arb_shift    <= 12'd0;
             ctrl_shift   <= 6'd0;
+            rx_dlc_shift <= 4'd0;
             data_shift   <= 64'd0;
             crc_shift    <= 15'd0;
             crc_latched  <= 1'b0;
@@ -446,13 +457,12 @@ module can_bsp (
                 data_bits    <= {3'b000, tx_dlc} << 3;  // dlc * 8, max 64
                 arb_shift    <= {tx_id, 1'b0};           // RTR = 0 (data frame)
                 ctrl_shift   <= {1'b0, 1'b0, tx_dlc};   // IDE = 0, r0 = 0
+                rx_dlc_shift <= 4'd0;
                 data_shift   <= tx_data;                  // capture host data bytes
                 crc_latched  <= 1'b0;
                 arb_lost     <= 1'b0;
-                // If entering because bus went dominant (!rx_bit), node is receiver
-                transmitting <= tx_request && !(state == IDLE && !rx_bit && sample_point)
-                                           && !(state == IFS  && (bit_cnt == 7'd2) && !rx_bit && sample_point)
-                                           && !(state == EOF  && (bit_cnt == 7'd6) && !rx_bit && sample_point);
+                // Host transmission request determines transmitting role (Day 29-30)
+                transmitting <= tx_request;
                 ack_received <= 1'b0;
                 ack_err_reg  <= 1'b0;
                 form_err_reg <= 1'b0;
@@ -470,6 +480,15 @@ module can_bsp (
             // -----------------------------------------------------------------
             if (state == CONTROL && proto_tick) begin
                 ctrl_shift <= {ctrl_shift[4:0], 1'b1};
+                if (!transmitting) begin
+                    if (bit_cnt >= 7'd2 && bit_cnt <= 7'd5) begin
+                        rx_dlc_shift <= {rx_dlc_shift[2:0], destuff_bit_out};
+                        if (bit_cnt == 7'd5) begin
+                            dlc_latch <= ({rx_dlc_shift[2:0], destuff_bit_out} > 4'd8) ? 4'd8 : {rx_dlc_shift[2:0], destuff_bit_out};
+                            data_bits <= {3'b000, (({rx_dlc_shift[2:0], destuff_bit_out} > 4'd8) ? 4'd8 : {rx_dlc_shift[2:0], destuff_bit_out})} << 3;
+                        end
+                    end
+                end
             end
 
             // -----------------------------------------------------------------
@@ -487,7 +506,7 @@ module can_bsp (
                 crc_latched <= 1'b1;
             end
 
-            if (state == CRC_FIELD && bit_tick && crc_latched && bit_cnt < 7'd15) begin
+            if (state == CRC_FIELD && proto_tick && crc_latched && bit_cnt < 7'd15) begin
                 crc_shift <= {crc_shift[13:0], 1'b1};
             end
 
@@ -531,7 +550,7 @@ module can_bsp (
 
             // ------------------------------------------------------------------
             IDLE: begin
-                if (!bus_off && (tx_request || (!rx_bit && sample_point)))
+                if (!bus_off && (tx_request || hard_sync || (!rx_bit && sample_point)))
                     next_state = SOF;
             end
 
@@ -550,7 +569,7 @@ module can_bsp (
             // ------------------------------------------------------------------
             CONTROL: begin
                 if (proto_tick && bit_cnt >= (LEN_CTRL - 1))
-                    next_state = (dlc_latch == 4'd0) ? CRC_FIELD : DATA;
+                    next_state = (active_ctrl_dlc == 4'd0) ? CRC_FIELD : DATA;
             end
 
             // ------------------------------------------------------------------
@@ -604,7 +623,7 @@ module can_bsp (
                 // Normal exit: start next frame if tx_request, else return to IDLE.
                 if (ifs_overload_err) begin
                     next_state = ERROR_FRAME;
-                end else if ((bit_cnt == 7'd2) && sample_point && (rx_bit == 1'b0)) begin
+                end else if ((bit_cnt >= 7'd2) && (hard_sync || (sample_point && (rx_bit == 1'b0)))) begin
                     next_state = SOF;
                 end else if (bit_tick && bit_cnt >= (LEN_IFS - 1)) begin
                     next_state = tx_request ? SOF : IDLE;
@@ -633,7 +652,8 @@ module can_bsp (
     // Output logic
     // =========================================================================
 
-    assign state_out = state;
+    assign state_out    = state;
+    assign wait_for_sof = (state == IDLE) || (state == IFS && bit_cnt >= 7'd2);
 
     // Frame active while not in IDLE or IFS
     assign frame_active = (state != IDLE) && (state != IFS);
@@ -666,12 +686,9 @@ module can_bsp (
     end
 
     // Actual bus bit driven:
-    // During non-stuffed states (CRC delimiter, ACK, EOF, IFS, ERROR_FRAME), bypass stuffer register
-    // to keep bus level and enable in exact cycle-accurate phase.
-    // In stuffed protocol states, drive from stuffer.
-    assign tx_bit = ((state == CRC_FIELD && bit_cnt == 7'd15 && !loopback) || state == ACK || state == EOF || state == IFS || state == ERROR_FRAME)
-                  ? raw_tx_bit
-                  : stuffer_bit_out;
+    // When a stuff bit is inserted by the bit stuffer, drive stuffer_bit_out (~last_bit).
+    // Otherwise, drive raw_tx_bit directly with zero pipeline delay (Day 29-30).
+    assign tx_bit = stuffing_active ? stuffer_bit_out : raw_tx_bit;
 
     // Bus drive enable:
     // When ERROR_FRAME: actively drive dominant for first 6 bits (error flag), release during delimiter.
@@ -680,7 +697,7 @@ module can_bsp (
     // In EOF, IFS, and IDLE: bus is released / recessive (tx_en = 0).
     assign tx_en = !bus_off && (
                    ((state == ERROR_FRAME) ? (error_active && (bit_cnt < 7'd6)) :
-                   (!arb_lost && (state == SOF         ||
+                   (transmitting && !arb_lost && (state == SOF         ||
                                   state == ARBITRATION ||
                                   state == CONTROL     ||
                                   state == DATA        ||

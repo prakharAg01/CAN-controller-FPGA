@@ -68,8 +68,8 @@ module can_rx_assembler (
     logic        crc_calc_en;
     logic [14:0] crc_computed;
 
-    // Initialize CRC when idle or error
-    assign crc_init = clear || (bsp_state == ST_IDLE) || (bsp_state == ST_ERROR_FRAME);
+    // Initialize CRC when idle, IFS, or error
+    assign crc_init = clear || (bsp_state == ST_IDLE) || (bsp_state == ST_IFS) || (bsp_state == ST_ERROR_FRAME);
 
     // Calculate CRC over SOF (bit 0), ID (1..11), RTR (12), IDE/r0 (13..14), DLC (15..18), and DATA
     // Total header bits = 19 bits (0..18). Total covered bits = 19 + data_bit_len.
@@ -97,7 +97,7 @@ module can_rx_assembler (
             dlc_reg      <= 4'd0;
             data_shift   <= 64'd0;
             crc_rx_shift <= 15'd0;
-        end else if (clear || (bsp_state == ST_IDLE) || (bsp_state == ST_ERROR_FRAME) || frame_valid) begin
+        end else if (clear || (bsp_state == ST_IDLE) || (bsp_state == ST_IFS) || (bsp_state == ST_ERROR_FRAME) || frame_valid) begin
             in_frame     <= 1'b0;
             rx_bit_cnt   <= 7'd0;
             id_shift     <= 11'd0;

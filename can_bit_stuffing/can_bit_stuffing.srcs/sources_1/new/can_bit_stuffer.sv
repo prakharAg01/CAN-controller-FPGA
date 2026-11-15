@@ -2,29 +2,13 @@
 // Module : can_bit_stuffer  (TX side)
 //
 // After 5 consecutive bits of equal polarity, inserts one complementary
-// stuff bit. Active while stuff_en is high (SOF .. end of CRC field).
+// stuff bit. Active while stuff_en is high (SOF .. end of CRC sequence).
 //
-// Timing model
-//   * The module only updates the bus bit on 'bit_tick' (1-clk strobe, once
-//     per CAN bit time, from your bit-timing logic). Between ticks bit_out
-//     is held.
-//   * Handshake with the BSP (valid/ready style):
-//         transfer happens on a clock edge where  data_valid && ready
-//     'ready' is high only in a tick cycle in which bit_in will actually be
-//     consumed. In a tick cycle where a stuff bit is sent, ready = 0 and the
-//     BSP simply keeps bit_in / data_valid unchanged. 'stuff_pending' goes
-//     high a full bit time BEFORE that tick, so the BSP can see it coming.
-//   * The BSP must present a valid bit on every tick while a frame is being
-//     sent (an underrun would repeat the previous bit on the bus).
-//
-// Behaviour notes
-//   * A pending stuff bit is ALWAYS sent, even if stuff_en drops meanwhile.
-//     This is what gives the mandatory stuff bit after a CRC that ends in
-//     5 identical bits (before the CRC delimiter).
-//   * With stuff_en low the module is a transparent pass-through (bit_in ->
-//     bit_out on tick), so it can drive the bus for the whole frame.
-//   * 'clear' aborts everything synchronously (error/overload frame, new
-//     frame). Reset is asynchronous, active low.
+// Timing model:
+//   * Combinational passthrough when not stuffing (zero pipeline lag):
+//     bit_out = stuffing ? ~last_bit : bit_in.
+//   * When 5 identical bits are transmitted, inserts a complementary stuff bit
+//     for one CAN bit time, while holding ready=0 so BSP shift registers pause.
 //=============================================================================
 module can_bit_stuffer (
     input  logic clk,
@@ -36,66 +20,60 @@ module can_bit_stuffer (
     input  logic bit_in,         // raw protocol bit
     output logic ready,          // bit_in consumed on this clock edge if data_valid
     output logic stuff_pending,  // next tick will send a stuff bit (BSP must hold)
-    output logic bit_out,        // bit to drive on the bus (held between ticks)
+    output logic bit_out,        // bit to drive on the bus
     output logic bit_out_valid,  // 1-clk pulse: bit_out was updated this tick
     output logic stuffing        // bit_out currently holds a stuff bit
 );
 
     logic [2:0] same_count;      // length of current run of equal bits (0..5)
     logic       last_bit;
+    logic       stuffing_r;
 
-    assign ready = bit_tick & ~stuff_pending;
+    assign stuffing      = stuffing_r;
+    assign stuff_pending = stuff_en && !stuffing_r && (bit_in == last_bit) && (same_count == 3'd4);
+    assign ready         = bit_tick & ~stuffing_r;
+    assign bit_out       = stuffing_r ? ~last_bit : bit_in;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             same_count    <= 3'd0;
             last_bit      <= 1'b1;   // idle bus = recessive
-            bit_out       <= 1'b1;
+            stuffing_r    <= 1'b0;
             bit_out_valid <= 1'b0;
-            stuffing      <= 1'b0;
-            stuff_pending <= 1'b0;
         end else if (clear) begin
             same_count    <= 3'd0;
             last_bit      <= 1'b1;
-            bit_out       <= 1'b1;
+            stuffing_r    <= 1'b0;
             bit_out_valid <= 1'b0;
-            stuffing      <= 1'b0;
-            stuff_pending <= 1'b0;
         end else begin
-            bit_out_valid <= 1'b0;
+            bit_out_valid <= bit_tick;
 
-            // Stuffing disabled and nothing owed: keep run tracker clean.
-            if (!stuff_en && !stuff_pending) begin
+            if (!stuff_en && !stuffing_r) begin
                 same_count <= 3'd0;
                 last_bit   <= 1'b1;
             end
 
             if (bit_tick) begin
-                if (stuff_pending) begin
-                    // Owed stuff bit: sent regardless of stuff_en / data_valid.
-                    bit_out       <= ~last_bit;
-                    last_bit      <= ~last_bit;
-                    same_count    <= 3'd1;      // stuff bit starts a new run
-                    stuff_pending <= 1'b0;
-                    stuffing      <= 1'b1;
-                    bit_out_valid <= 1'b1;
-                end else if (data_valid) begin
-                    bit_out       <= bit_in;
-                    stuffing      <= 1'b0;
-                    bit_out_valid <= 1'b1;
-                    if (stuff_en) begin
-                        last_bit <= bit_in;
-                        if (bit_in == last_bit) begin
-                            if (same_count == 3'd4) begin
-                                stuff_pending <= 1'b1;   // this was the 5th
-                                same_count    <= 3'd5;
-                            end else begin
-                                same_count <= same_count + 3'd1;
-                            end
+                if (stuffing_r) begin
+                    // End of stuff bit: stuff bit had value ~last_bit
+                    last_bit   <= ~last_bit;
+                    same_count <= 3'd1;
+                    stuffing_r <= 1'b0;
+                end else if (stuff_en) begin
+                    if (bit_in == last_bit) begin
+                        if (same_count == 3'd4) begin
+                            // This bit was the 5th identical bit: send stuff bit on next bit time
+                            stuffing_r <= 1'b1;
                         end else begin
-                            same_count <= 3'd1;
+                            same_count <= same_count + 3'd1;
                         end
+                    end else begin
+                        last_bit   <= bit_in;
+                        same_count <= 3'd1;
                     end
+                end else begin
+                    same_count <= 3'd0;
+                    last_bit   <= 1'b1;
                 end
             end
         end

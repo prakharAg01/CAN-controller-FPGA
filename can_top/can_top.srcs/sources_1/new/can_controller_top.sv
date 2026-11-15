@@ -142,9 +142,11 @@ module can_controller_top (
     wire btl_rx_in = loopback_en ? internal_tx_bit : can_rx;
 
     // Synchronizer enables for BTL
-    wire btl_hsync_en    = (bsp_state_out == 4'd0); // Hard sync on SOF when idle
-    wire btl_rsync_en    = (bsp_state_out != 4'd0); // Resync during frame
+    logic        bsp_wait_for_sof;
+    wire btl_hsync_en    = bsp_wait_for_sof; // Hard sync on SOF when idle or IFS bit 2
+    wire btl_rsync_en    = !bsp_wait_for_sof; // Resync during frame
     wire btl_tx_dominant = bsp_tx_en && !bsp_tx_bit;
+    wire btl_clear       = abort_tx || (bsp_state_out == 4'd0 && bsp_tx_req);
 
     // =========================================================================
     // 2. Bit Timing Logic (`can_btl`)
@@ -152,7 +154,7 @@ module can_controller_top (
     can_btl u_btl (
         .clk            (clk),
         .rst_n          (rst_n && !soft_reset),
-        .clear          (abort_tx),
+        .clear          (btl_clear),
         .brp            (btr_brp),
         .tseg1          (btr_tseg1),
         .tseg2          (btr_tseg2),
@@ -181,6 +183,7 @@ module can_controller_top (
         .bit_tick        (btl_bit_tick),
         .sample_point    (btl_sample_point),
         .rx_bit          (btl_rx_bit),
+        .hard_sync       (btl_hard_sync),
         .tx_request      (bsp_tx_req),
         .tx_id           (bsp_tx_id),
         .tx_dlc          (bsp_tx_dlc),
@@ -199,6 +202,7 @@ module can_controller_top (
         .rx_stuff_error  (bsp_rx_stuff_error),
         .error_out       (bsp_error_out),
         .state_out       (bsp_state_out),
+        .wait_for_sof    (bsp_wait_for_sof),
         .tx_success      (bsp_tx_done),
         .rx_success      (eml_rx_success),
         .tec             (eml_tec),
