@@ -34,6 +34,7 @@ module can_controller_top (
     // -------------------------------------------------------------------------
     output logic        can_tx,       // CAN Transmit (TXD) pin
     input  logic        can_rx,       // CAN Receive  (RXD) pin
+    input  logic        pad_loopback = 1'b0, // 1 = External Pad Loopback (btl_rx_in listens to can_rx pad)
 
     // -------------------------------------------------------------------------
     // Debug & Status Outputs
@@ -137,9 +138,9 @@ module can_controller_top (
     // When listen_only is enabled: physical can_tx is held recessive (1)
     wire internal_tx_bit = bsp_tx_en ? bsp_tx_bit : 1'b1;
 
-    assign can_tx = (loopback_en || listen_only) ? 1'b1 : internal_tx_bit;
+    assign can_tx = (listen_only) ? 1'b1 : internal_tx_bit;
 
-    wire btl_rx_in = loopback_en ? internal_tx_bit : can_rx;
+    wire btl_rx_in = (loopback_en && !pad_loopback) ? internal_tx_bit : can_rx;
 
     // Synchronizer enables for BTL
     logic        bsp_wait_for_sof;
