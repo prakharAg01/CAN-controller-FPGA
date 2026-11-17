@@ -168,11 +168,11 @@ module nexys4_can_top (
         end else begin
             case (seq_state)
                 INIT_IDLE: begin
-                    // Step 1: Write BTR = 0x00002300 (BRP=0, TSEG1=3, TSEG2=2 -> 8 clocks/bit = 12.5 Mbps at 100MHz)
+                    // Step 1: Write BTR = 0x00008953 (500 kbps: 10 TQ/bit, 20 clocks/TQ @ 100MHz, 70% sample point, SJW=2)
                     reg_cs    <= 1'b1;
                     reg_we    <= 1'b1;
                     reg_addr  <= ADDR_BTR;
-                    reg_wdata <= 32'h00002300;
+                    reg_wdata <= 32'h00008953;
                     seq_state <= INIT_BTR;
                 end
 
