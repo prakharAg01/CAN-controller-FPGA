@@ -42,7 +42,8 @@ module can_controller_top (
     output logic [3:0]  debug_state,  // BSP FSM numeric state
     output logic [1:0]  debug_node_st,// 00=Active, 01=Passive, 10=Bus-Off
     output logic [7:0]  debug_tec,    // Transmit Error Counter
-    output logic [7:0]  debug_rec     // Receive Error Counter
+    output logic [7:0]  debug_rec,    // Receive Error Counter
+    output logic        rx_fifo_empty // RX FIFO Empty status
 );
 
     // =========================================================================
@@ -357,6 +358,7 @@ module can_controller_top (
     assign debug_node_st = eml_node_state;
     assign debug_tec     = eml_tec;
     assign debug_rec     = eml_rec;
+    assign rx_fifo_empty = rx_empty;
 
 endmodule
 

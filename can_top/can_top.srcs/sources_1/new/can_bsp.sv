@@ -261,9 +261,13 @@ module can_bsp (
     // Active during SOF, ARBITRATION, CONTROL, DATA, and CRC_FIELD (bits 0..14).
     // CRC delimiter (bit 15) and beyond: no stuffing per CAN 2.0A.
     // =========================================================================
-    assign stuff_en = (state == SOF) || (state == ARBITRATION) ||
-                      (state == CONTROL) || (state == DATA) ||
-                      ((state == CRC_FIELD) && (bit_cnt < 7'd15));
+    assign stuff_en = transmitting && (
+                      (state == SOF) ||
+                      (state == ARBITRATION) ||
+                      (state == CONTROL) ||
+                      (state == DATA) ||
+                      ((state == CRC_FIELD) && (bit_cnt < 7'd15))
+                      );
 
     // Protocol tick: strobe when a real protocol bit is consumed by the stuffer/destuffer.
     // When stuffing is disabled (CRC delimiter, ACK, EOF, IFS, ERROR_FRAME), matches bit_tick.
@@ -686,23 +690,25 @@ module can_bsp (
     end
 
     // Actual bus bit driven:
-    // When a stuff bit is inserted by the bit stuffer, drive stuffer_bit_out (~last_bit).
-    // Otherwise, drive raw_tx_bit directly with zero pipeline delay (Day 29-30).
-    assign tx_bit = stuffing_active ? stuffer_bit_out : raw_tx_bit;
+    // Only allow bit stuffer to drive when actively transmitting (never corrupt receiver ACK)
+    assign tx_bit = (transmitting && stuffing_active) ? stuffer_bit_out : raw_tx_bit;
 
     // Bus drive enable:
-    // When ERROR_FRAME: actively drive dominant for first 6 bits (error flag), release during delimiter.
-    // When transmitting standard frame fields: drive as long as arbitration is not lost.
-    // When receiver in ACK slot with valid CRC: actively drive dominant ACK bit.
-    // In EOF, IFS, and IDLE: bus is released / recessive (tx_en = 0).
-    assign tx_en = !bus_off && (
-                   ((state == ERROR_FRAME) ? (error_active && (bit_cnt < 7'd6)) :
-                   (transmitting && !arb_lost && (state == SOF         ||
+    always_comb begin
+        if (bus_off) begin
+            tx_en = 1'b0;
+        end else if (state == ERROR_FRAME) begin
+            tx_en = error_active && (bit_cnt < 7'd6);
+        end else if (transmitting) begin
+            tx_en = !arb_lost && (state == SOF         ||
                                   state == ARBITRATION ||
                                   state == CONTROL     ||
                                   state == DATA        ||
-                                  state == CRC_FIELD)) ||
-                   (!transmitting && (state == ACK) && (bit_cnt == 7'd0) && crc_ok))
-                   );
+                                  state == CRC_FIELD);
+        end else begin
+            // Receiver actively driving dominant in ACK slot if CRC was verified
+            tx_en = (state == ACK) && (bit_cnt == 7'd0) && crc_ok;
+        end
+    end
 
 endmodule

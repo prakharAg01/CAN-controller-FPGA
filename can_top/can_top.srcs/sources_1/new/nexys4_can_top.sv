@@ -6,12 +6,13 @@
 // Features    :
 //   - Connects 100 MHz oscillator and debounced reset
 //   - Connects CAN physical transceiver pads (Pmod JA)
+//   - Connects USB-UART Bridge at 115200 baud (Pins C4 / D4)
+//   - Automatic RX FIFO drain & streaming to PC terminal (Day 38)
+//   - PC-controlled or Button-controlled CAN frame transmission
 //   - 1 Hz Heartbeat LED indicator
-//   - On-board self-test FSM (triggered on startup or via BTNU button)
-//   - Hardware switch SW[0] for internal loopback mode (Day 35 test)
 //   - 16 Status LEDs displaying FSM state, Error state, IRQ, and TEC
 //
-// Day 33-35   : FPGA Bring-up & Hardware Demonstration
+// Day 38      : UART Gateway & Host Command Protocol
 // =============================================================================
 
 `timescale 1ns/1ps
@@ -23,12 +24,16 @@ module nexys4_can_top (
     input  logic        btn_send,     // Up push button BTNU (Pin M18, trigger send)
 
     // Configuration Switches
-    input  logic [1:0]  sw,           // SW[0] = Internal Loopback, SW[1] = Reserved
+    input  logic [1:0]  sw,           // SW[0] = Internal Loopback, SW[1] = Pad Loopback
 
     // CAN Transceiver Interface (Pmod Header JA)
     output logic        can_tx,       // JA Pin 1 (Pin C17) -> Transceiver TXD
     input  logic        can_rx,       // JA Pin 2 (Pin D18) <- Transceiver RXD
     output logic        can_s,        // JA Pin 3 (Pin E18) -> Transceiver Silent/Standby (0=Active)
+
+    // USB-UART Interface (FT2232HQ Bridge)
+    input  logic        uart_rxd,     // Pin C4 (PC -> FPGA)
+    output logic        uart_txd,     // Pin D4 (FPGA -> PC)
 
     // 16 Status LEDs
     output logic [15:0] led
@@ -110,184 +115,64 @@ module nexys4_can_top (
     assign can_s           = 1'b0; // Normal active mode (not standby)
 
     // -------------------------------------------------------------------------
-    // 5. Host Register Interface & On-board Self-Test Sequencer
+    // 5. Host Register Interconnect
     // -------------------------------------------------------------------------
-    localparam [7:0] ADDR_MODECR    = 8'h00; // Mode & Control Register
-    localparam [7:0] ADDR_CMR       = 8'h04; // Command Register (Strobes)
-    localparam [7:0] ADDR_SR        = 8'h08; // Status Register (RO)
-    localparam [7:0] ADDR_IR_IE     = 8'h0C; // Interrupt Status (W1C) & Enable (R/W)
-    localparam [7:0] ADDR_BTR       = 8'h10; // Bit Timing Register
-    localparam [7:0] ADDR_AFID      = 8'h14; // Acceptance Filter ID
-    localparam [7:0] ADDR_AFMSK     = 8'h18; // Acceptance Filter Mask
-    localparam [7:0] ADDR_ECR       = 8'h1C; // Error Counter Register (RO)
-    localparam [7:0] ADDR_TX_HEADER = 8'h20; // TX Frame Header (ID, RTR, DLC)
-    localparam [7:0] ADDR_TX_DATA_L = 8'h24; // TX Payload Bytes 0..3
-    localparam [7:0] ADDR_TX_DATA_H = 8'h28; // TX Payload Bytes 4..7
-    localparam [7:0] ADDR_RX_HEADER = 8'h2C; // RX Frame Header (RO)
-    localparam [7:0] ADDR_RX_DATA_L = 8'h30; // RX Payload Bytes 0..3 (RO)
-    localparam [7:0] ADDR_RX_DATA_H = 8'h34; // RX Payload Bytes 4..7 (RO)
-    localparam [7:0] ADDR_FIFO_CNT  = 8'h38; // RX FIFO Count (RO)
+    wire        reg_cs;
+    wire        reg_we;
+    wire [7:0]  reg_addr;
+    wire [31:0] reg_wdata;
+    wire [31:0] reg_rdata;
+    wire        reg_ack;
+    wire        irq_out;
 
-    logic        reg_cs;
-    logic        reg_we;
-    logic [7:0]  reg_addr;
-    logic [31:0] reg_wdata;
-    wire  [31:0] reg_rdata;
-    wire         reg_ack;
-    wire         irq_out;
+    wire [3:0]  debug_state;
+    wire [1:0]  debug_node_st;
+    wire [7:0]  debug_tec;
+    wire [7:0]  debug_rec;
 
-    wire [3:0]   debug_state;
-    wire [1:0]   debug_node_st;
-    wire [7:0]   debug_tec;
-    wire [7:0]   debug_rec;
-
-    typedef enum logic [3:0] {
-        INIT_IDLE,      // 0
-        INIT_BTR,       // 1
-        INIT_AFID,      // 2
-        INIT_AFMSK,     // 3
-        INIT_IR_IE,     // 4
-        INIT_MODECR,    // 5
-        ST_READY,       // 6
-        SEND_SET_MODE,  // 7
-        SEND_HDR,       // 8
-        SEND_DATA_L,    // 9
-        SEND_TRIGGER,   // 10 (4'b1010)
-        ST_WAIT_ACK     // 11 (4'b1011)
-    } seq_state_t;
-
-    seq_state_t seq_state;
-
-    always_ff @(posedge clk or negedge sys_rst_n) begin
-        if (!sys_rst_n) begin
-            seq_state <= INIT_IDLE;
-            reg_cs    <= 1'b0;
-            reg_we    <= 1'b0;
-            reg_addr  <= 8'h00;
-            reg_wdata <= 32'h0;
-        end else begin
-            case (seq_state)
-                INIT_IDLE: begin
-                    // Step 1: Write BTR = 0x00008953 (500 kbps: 10 TQ/bit, 20 clocks/TQ @ 100MHz, 70% sample point, SJW=2)
-                    reg_cs    <= 1'b1;
-                    reg_we    <= 1'b1;
-                    reg_addr  <= ADDR_BTR;
-                    reg_wdata <= 32'h00008953;
-                    seq_state <= INIT_BTR;
-                end
-
-                INIT_BTR: begin
-                    if (reg_ack) begin
-                        // Step 2: Write AFID = 0x00000000
-                        reg_addr  <= ADDR_AFID;
-                        reg_wdata <= 32'h00000000;
-                        seq_state <= INIT_AFID;
-                    end
-                end
-
-                INIT_AFID: begin
-                    if (reg_ack) begin
-                        // Step 3: Write AFMSK = 0x00000000 (Accept all IDs)
-                        reg_addr  <= ADDR_AFMSK;
-                        reg_wdata <= 32'h00000000;
-                        seq_state <= INIT_AFMSK;
-                    end
-                end
-
-                INIT_AFMSK: begin
-                    if (reg_ack) begin
-                        // Step 4: Write IR_IE = 0x00030000 (Enable TX_DONE & RX_VALID interrupts)
-                        reg_addr  <= ADDR_IR_IE;
-                        reg_wdata <= 32'h00030000;
-                        seq_state <= INIT_IR_IE;
-                    end
-                end
-
-                INIT_IR_IE: begin
-                    if (reg_ack) begin
-                        // Step 5: Exit reset mode: MODECR = loopback (2) or normal (0)
-                        reg_addr  <= ADDR_MODECR;
-                        reg_wdata <= (sw[0] || sw[1]) ? 32'h00000002 : 32'h00000000;
-                        seq_state <= INIT_MODECR;
-                    end
-                end
-
-                INIT_MODECR: begin
-                    if (reg_ack) begin
-                        reg_cs    <= 1'b0;
-                        reg_we    <= 1'b0;
-                        seq_state <= ST_READY;
-                    end
-                end
-
-                ST_READY: begin
-                    reg_cs <= 1'b0;
-                    reg_we <= 1'b0;
-                    if (btn_pulse) begin
-                        // Update MODECR with current switch positions
-                        reg_cs    <= 1'b1;
-                        reg_we    <= 1'b1;
-                        reg_addr  <= ADDR_MODECR;
-                        reg_wdata <= (sw[0] || sw[1]) ? 32'h00000002 : 32'h00000000;
-                        seq_state <= SEND_SET_MODE;
-                    end
-                end
-
-                SEND_SET_MODE: begin
-                    if (reg_ack) begin
-                        // Stage TX Frame Header: ID = 0x155, DLC = 4 -> 0x00040155
-                        reg_addr  <= ADDR_TX_HEADER;
-                        reg_wdata <= 32'h00040155;
-                        seq_state <= SEND_HDR;
-                    end
-                end
-
-                SEND_HDR: begin
-                    if (reg_ack) begin
-                        // Stage TX Data: 0x11223344
-                        reg_addr  <= ADDR_TX_DATA_L;
-                        reg_wdata <= 32'h11223344;
-                        seq_state <= SEND_DATA_L;
-                    end
-                end
-
-                SEND_DATA_L: begin
-                    if (reg_ack) begin
-                        // Trigger transmission via CMR: Bit 0 = 1 (TX_REQ strobe)
-                        reg_addr  <= ADDR_CMR;
-                        reg_wdata <= 32'h00000001;
-                        seq_state <= SEND_TRIGGER;
-                    end
-                end
-
-                SEND_TRIGGER: begin
-                    if (reg_ack) begin
-                        reg_cs    <= 1'b0;
-                        reg_we    <= 1'b0;
-                        seq_state <= ST_WAIT_ACK;
-                    end
-                end
-
-                ST_WAIT_ACK: begin
-                    // Stay in ST_WAIT_ACK until irq_out asserts
-                    if (irq_out) begin
-                        seq_state <= ST_READY;
-                    end
-                end
-
-                default: seq_state <= ST_READY;
-            endcase
-        end
-    end
+    wire [3:0]  gw_state_led;
+    wire [7:0]  rx_frame_count;
+    wire        rx_fifo_empty;
 
     // -------------------------------------------------------------------------
-    // 6. CAN Controller Top Instance
+    // 6. Day 38: UART Host Gateway
+    // -------------------------------------------------------------------------
+    can_uart_gateway u_gateway (
+        .clk             (clk),
+        .rst_n           (sys_rst_n),
+
+        // Physical UART Pins
+        .uart_rxd        (uart_rxd),
+        .uart_txd        (uart_txd),
+
+        // Controls
+        .btn_send_pulse  (btn_pulse),
+        .sw_loopback     (sw[0]),
+        .sw_pad_loopback (sw[1]),
+
+        // Register Bus Master
+        .reg_cs          (reg_cs),
+        .reg_we          (reg_we),
+        .reg_addr        (reg_addr),
+        .reg_wdata       (reg_wdata),
+        .reg_rdata       (reg_rdata),
+        .reg_ack         (reg_ack),
+        .irq_out         (irq_out),
+        .rx_fifo_empty   (rx_fifo_empty),
+
+        // Diagnostics
+        .gw_state_led    (gw_state_led),
+        .rx_frame_count  (rx_frame_count)
+    );
+
+    // -------------------------------------------------------------------------
+    // 7. CAN Controller Top Instance
     // -------------------------------------------------------------------------
     can_controller_top u_can_controller (
         .clk          (clk),
         .rst_n        (sys_rst_n),
 
-        // Host Register Interface
+        // Host Register Interface (Slave to UART Gateway)
         .reg_cs       (reg_cs),
         .reg_we       (reg_we),
         .reg_addr     (reg_addr),
@@ -305,17 +190,18 @@ module nexys4_can_top (
         .debug_state  (debug_state),
         .debug_node_st(debug_node_st),
         .debug_tec    (debug_tec),
-        .debug_rec    (debug_rec)
+        .debug_rec    (debug_rec),
+        .rx_fifo_empty(rx_fifo_empty)
     );
 
     // -------------------------------------------------------------------------
-    // 7. Status LED Output Assignment
+    // 8. Status LED Output Assignment
     // -------------------------------------------------------------------------
     assign led[3:0]   = debug_state[3:0];   // BSP FSM numeric state
     assign led[5:4]   = debug_node_st[1:0]; // 00=Active, 01=Passive, 10=Bus-Off
     assign led[6]     = irq_out;            // High when TX_DONE or RX_VALID
     assign led[7]     = heartbeat;          // Heartbeat 1 Hz flash
-    assign led[11:8]  = seq_state[3:0];     // Onboard sequencer state
+    assign led[11:8]  = gw_state_led[3:0];  // Gateway FSM state
     assign led[15:12] = debug_tec[3:0];     // Transmit Error Counter (low nibble)
 
 endmodule
