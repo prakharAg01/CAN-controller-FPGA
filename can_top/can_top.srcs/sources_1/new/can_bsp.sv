@@ -233,8 +233,10 @@ module can_bsp (
     // =========================================================================
     // Day 18 Error Detection Conditions
     // =========================================================================
-    // CRC delimiter (bit 15 of CRC_FIELD) must be recessive
-    wire crc_delim_err = (state == CRC_FIELD) && (bit_cnt == 7'd15) &&
+    // CRC delimiter (bit 15 of CRC_FIELD) must be recessive.
+    // For transmitter, bit_cnt is 15. For receiver, bit_cnt reaches 16 during delimiter.
+    wire crc_delim_err = (state == CRC_FIELD) &&
+                         (transmitting ? (bit_cnt == 7'd15) : (bit_cnt == 7'd16)) &&
                          sample_point && (rx_bit == 1'b0) && !loopback;
 
     // ACK delimiter (bit 1 of ACK) must be recessive
@@ -305,7 +307,7 @@ module can_bsp (
                         (state == ARBITRATION) ||
                         (state == CONTROL) ||
                         (state == DATA) ||
-                        ((state == CRC_FIELD) && (bit_cnt < 7'd15));
+                        ((state == CRC_FIELD) && (bit_cnt < 7'd15 || destuff_stuff_expected));
 
     // Clear destuffer on synchronous abort or whenever frame starts/restarts
     wire destuff_clear = clear || (state == IDLE && next_state == SOF)
@@ -586,7 +588,7 @@ module can_bsp (
             CRC_FIELD: begin
                 if (crc_delim_err) begin
                     next_state = ERROR_FRAME;
-                end else if (bit_tick && bit_cnt >= (LEN_CRC - 1)) begin
+                end else if (bit_tick && (transmitting ? (bit_cnt >= (LEN_CRC - 1)) : (bit_cnt >= LEN_CRC))) begin
                     next_state = ACK;
                 end
             end
