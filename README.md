@@ -2,9 +2,9 @@
 
 ## Overview
 
-This project focuses on the design and FPGA implementation of independent modules required for a Classical CAN 2.0A/B protocol controller.
+This project focuses on the design, simulation, and FPGA hardware realization of a Classical CAN 2.0A/B protocol controller in synthesizable SystemVerilog, targeting the AMD Xilinx Artix-7 FPGA on the Digilent Nexys 4 DDR development platform.
 
-Each CAN function is developed and verified as a separate RTL module first. After individual verification, the modules can be integrated into the complete CAN controller.
+Each protocol sub-block is designed modularly, verified in isolation using self-checking testbenches, and integrated into a unified top-level controller core (`can_controller_top.sv`). The complete system is validated in simulation and through real-world physical hardware communication with an external commercial CAN node (Arduino Uno + MCP2515 transceiver) over a 500 kbps differential CAN bus.
 
 ## Hardware and Tools
 
@@ -12,7 +12,9 @@ Each CAN function is developed and verified as a separate RTL module first. Afte
 - **Simulation:** AMD Xilinx Vivado XSim
 - **Synthesis / Implementation:** AMD Xilinx Vivado 2023.2
 - **FPGA Board:** Digilent Nexys 4 DDR
-- **FPGA Device:** Xilinx Artix-7 XC7A100T-1CSG324
+- **FPGA Device:** AMD Xilinx Artix-7 XC7A100T-1CSG324C
+- **Target CAN Bit Rate:** 500 kbps (100 MHz board clock, 10 TQ per bit time, 70% sample point)
+- **External Hardware:** Arduino Uno, Microchip MCP2515 CAN controller, TJA1050 / MCP2551 CAN transceivers
 
 ---
 
@@ -26,14 +28,13 @@ Each CAN function is developed and verified as a separate RTL module first. Afte
 | Bit Timing Logic (BTL) | Completed | Completed | Verified |
 | TX Serializer | Completed | Completed | Verified |
 | RX Deserializer | Completed | Completed | Verified |
-| Acceptance Filter | Completed | In progress | Verified |
-| Bit Stream Processor (BSP) | Completed | In progress | Verified |
-| Error Management Logic (EML) | Completed | In progress | Verified |
-| TX Buffer & Inferred BRAM RX FIFO | Completed | In progress | Verified |
-| Host Register Interface | Completed | In progress | Verified |
-| Top-Level Controller (`can_controller_top`) | Completed | In progress | Verified |
-| Dual-Node System & Bus Arbitration | Completed | In progress | Verified |
-
+| Acceptance Filter | Completed | Completed | Verified |
+| Bit Stream Processor (BSP) | Completed | Completed | Verified |
+| Error Management Logic (EML) | Completed | Completed | Verified |
+| TX Buffer & Inferred BRAM RX FIFO | Completed | Completed | Verified |
+| Host Register Interface | Completed | Completed | Verified |
+| Top-Level Controller (`can_controller_top`) | Completed | Completed | Verified |
+| Dual-Node System & Bus Arbitration | Completed | Completed | Verified |
 
 ---
 
@@ -41,7 +42,7 @@ Each CAN function is developed and verified as a separate RTL module first. Afte
 
 ## Purpose
 
-The bit stuffer inserts one complementary bit after five consecutive bits of the same polarity while CAN bit stuffing is enabled.
+The bit stuffer inserts one complementary bit after five consecutive bits of the same polarity while CAN bit stuffing is enabled (from Start-of-Frame through the CRC sequence).
 
 ## Files
 
@@ -55,16 +56,17 @@ Verified using a self-checking SystemVerilog testbench.
 
 Tests include:
 
-- five consecutive `0`s
-- five consecutive `1`s
-- long runs of identical bits
-- randomized run-heavy bit streams
-- trailing stuff-bit cases
+- Five consecutive `0`s
+- Five consecutive `1`s
+- Long runs of identical bits
+- Randomized run-heavy bit streams
+- Trailing stuff-bit cases at the CRC boundary
 
 ## FPGA Verification
+
 [Watch the implementation of Stuffer and DeStuffer on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQA1kvPVU3V8ToO6Xl6lxWgNAVOErDggriFbZTn9bCVfqDM?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WM0cXw).
 
-Implemented on the Digilent Nexys 4 DDR.
+Implemented on the Digilent Nexys 4 DDR (`can_stuff_destuff_demo_top.sv`).
 
 Manual examples:
 
@@ -75,9 +77,10 @@ Manual examples:
 
 The FPGA LEDs were used to observe:
 
-- current bus bit
-- stuffing activity
-- pending stuff bit
+- Current bus bit (`LED1`)
+- Stuffing activity (`LED2`)
+- Pending stuff bit (`LED3`)
+- Match pass indication (`LED5`) and sticky error latch (`LED6`)
 
 ## Status
 
@@ -89,7 +92,7 @@ The FPGA LEDs were used to observe:
 
 ## Purpose
 
-The bit destuffer removes inserted CAN stuff bits from the received bit stream and detects invalid stuffing conditions.
+The bit destuffer removes inserted CAN stuff bits from the received bit stream and detects invalid stuffing conditions (six consecutive identical bits within the stuffed frame region).
 
 ## Files
 
@@ -107,10 +110,9 @@ The testbench also verifies `stuff_error` behavior.
 
 ## FPGA Verification
 
-
 The stuffer output was connected internally to the destuffer input.
 
-The FPGA test verified that inserted stuff bits were removed and the original data bits were recovered.
+The FPGA test verified that inserted stuff bits were removed and the original data bits were recovered bit-by-bit.
 
 ## Status
 
@@ -157,18 +159,19 @@ CAN header-like test -> CRC 0x272F
 The testbench also verifies that the CRC value remains unchanged when `calc_en = 0`.
 
 ## FPGA Verification
+
 [Watch the implementation of the CRC on the FPGA](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQAUSu0wjZdlSrW3hum8-HPCAUnui2mtVKKSlad7LdSX0uU?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=WKHip6).
 
-Implemented on the Digilent Nexys 4 DDR.
+Implemented on the Digilent Nexys 4 DDR (`can_crc_demo_top.sv`).
 
 Board-level operation:
 
 ```text
-SW0   -> input bit
-BTNC  -> CRC reset
-BTNU  -> process one bit
-LED0-14 -> CRC value
-LED15 -> activity indication
+SW0     -> input bit
+BTNC    -> CRC reset
+BTNU    -> process one bit (debounced)
+LED0-14 -> 15-bit CRC value in real time
+LED15   -> activity indication toggle
 ```
 
 Example hardware checks:
@@ -189,10 +192,7 @@ Input 101010101010 -> CRC 0x77BB
 
 ## Purpose
 
-The BTL generates time-quanta ticks, bit ticks, and sample points from the
-configured bit-rate prescaler and CAN bit segments. It samples the receive bus,
-supports hard synchronization at start of frame, and resynchronizes during a
-frame using the synchronization jump width (SJW).
+The BTL divides the system clock into Time Quanta (TQ) using a programmable Baud Rate Prescaler (BRP) and subdivides each bit time into SYNC_SEG, TSEG1 (PROP_SEG + PHASE_SEG1), and TSEG2 (PHASE_SEG2). It samples the receive bus at the configured sample point, supports hard synchronization on Start-of-Frame (SOF), and performs dynamic phase resynchronization on late/early edges within the Synchronization Jump Width (SJW). It also embeds a 2-stage flip-flop synchronizer for asynchronous bus glitch filtering.
 
 ## Files
 
@@ -203,8 +203,23 @@ can_btl/can_btl.srcs/sim_1/new/tb_can_btl_baud.sv
 can_btl/can_btl.srcs/sim_1/new/tb_can_btl_sync.sv
 ```
 
-The BTL testbenches cover bit timing, baud configuration, hard sync, and
-resynchronization behavior.
+## Simulation
+
+Verified across dedicated simulation scenarios covering:
+
+- Free-running timing generation: BRP=3, TSEG1=5, TSEG2=2 (40 clocks/bit, sample point at 70%)
+- Glitch recovery: 2-clock glitches on `rx_in` suppressed by the 2-FF synchronizer
+- Hard synchronization: Restarting bit timing on SOF recessive-to-dominant edges
+- Full resynchronization: Early edge in TSEG2 terminating the bit when $|e| \le \text{SJW}$
+- Limited resynchronization: Late edge in TSEG1 extending segment duration by SJW
+
+## FPGA Verification
+
+Synthesized and integrated as the timing base for `can_controller_top.sv`. Operating at 100 MHz board clock, configured for 500 kbps CAN bus operation with $\text{BRP}=9$, $\text{TSEG1}=13$, $\text{TSEG2}=4$, and $\text{SJW}=3$.
+
+## Status
+
+**Completed and verified on FPGA.**
 
 ---
 
@@ -212,10 +227,7 @@ resynchronization behavior.
 
 ## Purpose
 
-The TX serializer loads frame fields and shifts them out most-significant bit
-first. The RX deserializer collects incoming de-stuffed bits into fields of a
-configured length. These modules provide the transmit and receive shift
-registers for assembling and parsing CAN frame data.
+The TX serializer (`can_tx_shift.sv`) converts parallel frame fields into a serial bit stream shifted MSB-first to the bit stuffer with back-to-back reload support. The RX deserializer (`can_rx_shift.sv`) gathers incoming destuffed bits into right-aligned words of configurable length for frame parsing.
 
 ## Files
 
@@ -227,14 +239,15 @@ can_btl/can_btl.srcs/sim_1/new/tb_can_rx_shift.sv
 can_btl/can_btl.srcs/sim_1/new/tb_can_shift_chain.sv
 ```
 
-The TX serializer supports field loading, ready/valid handshaking, and
-bubble-free reloads. The RX deserializer signals when each configured-length
-field has been collected. Testbenches cover the individual shift registers and
-their chain.
+The TX serializer supports field loading, ready/valid handshaking, and bubble-free reloads. The RX deserializer signals when each configured-length field has been collected. Testbenches cover the individual shift registers and their chain.
 
 ## FPGA Demonstration
 
 [Watch the FPGA implementation of the serializer and deserializer](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prakharagrawal_jklu_edu_in/IQDMzTgm2xkWRayTjft29vRSARhJACfPEV_SgnvLsn9wPJg?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=uY0ZRQ).
+
+## Status
+
+**Completed and verified on FPGA.**
 
 ---
 
@@ -243,6 +256,8 @@ their chain.
 ## Purpose
 
 The acceptance filter performs hardware message filtering on incoming standard 11-bit CAN identifiers. It compares the received identifier against a configurable acceptance code register (`filter_id`) and an acceptance mask register (`filter_mask`). Bits set to `1` in the mask require an exact match, while bits set to `0` are treated as "don't care", allowing selective reception of specific message IDs, groups of IDs, or wildcard reception.
+
+$$\text{accept} = ((\text{rx\_id} \oplus \text{filter\_id}) \ \& \ \text{filter\_mask}) == 0$$
 
 ## Files
 
@@ -253,7 +268,7 @@ can_acceptance_filter/can_acceptance_filter.srcs/sim_1/new/tb_can_acceptance_fil
 
 ## Simulation
 
-Verified using a self-checking SystemVerilog testbench.
+Verified using a self-checking SystemVerilog testbench across all 2048 possible standard identifiers.
 
 Tests include:
 
@@ -263,9 +278,17 @@ Tests include:
 - Rejection of non-matching identifiers
 - Boundary cases (all zeros `0x000`, all ones `0x7FF`)
 
+## FPGA Verification
+
+Synthesized and integrated into the top-level FPGA design (`can_controller_top.sv` and `nexys4_can_top.sv`):
+
+- **Hardware Range Filtering:** Configured for automotive ECU range filtering (`0x200` to `0x27F`, `filter_id = 11'h200`, `filter_mask = 11'h780`).
+- **Board Controls:** `SW[1]` toggles filter ON/OFF; `LED[15]` indicates filter active.
+- **Visual Feedback:** `LED[14]` flashes for 100 ms whenever an out-of-range frame (`0x3AA`, `0x555`) is rejected in hardware without consuming Block RAM cycles; `LED[7]` flashes when a matching frame (`0x244`, `0x260`) is admitted into the FIFO.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -297,9 +320,13 @@ Tests include:
 - Interframe space (IFS) intermission timing and hard-synchronization on incoming SOF edges
 - Active error flag driving (6 dominant bits) and passive error flag driving (6 recessive bits)
 
+## FPGA Verification
+
+Synthesized and integrated into `can_controller_top.sv` on the Digilent Nexys 4 DDR board. Tested at 500 kbps communicating over the physical CAN bus with the Arduino MCP2515 node, verifying complete frame exchange, ACK slot assertion, and error-frame handling.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -334,9 +361,15 @@ Tests include:
 - Bus-off recovery tracking (128 sequences of 11 recessive bits) and host abort/clear
 - Error warning threshold detection (`TEC >= 96` or `REC >= 96`)
 
+## FPGA Verification
+
+Demonstrated on physical hardware under live fault injection:
+- Disconnecting the CAN differential bus wire causes the receiver to miss ACK generation, prompting the FPGA EML to increment TEC by +8 on each failed attempt until entering Error-Passive state (`TEC > 128`).
+- Reconnecting the physical bus wire allows clean ACK verification, decrementing TEC by -1 per successful transmission back to 0.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -372,9 +405,13 @@ Tests include:
 - Acceptance filter gating (non-matching frames are rejected before Block RAM commit)
 - FIFO full flag assertion and overrun protection against memory corruption
 
+## FPGA Verification
+
+Synthesized and mapped to Xilinx 7-Series `RAMB18E1` Block RAM primitive on the Artix-7 device. Successfully verified during burst traffic reception from the Arduino transmitter without software FIFO overruns.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -415,9 +452,13 @@ Tests include:
 - Self-clearing command strobes (`CMR`)
 - Interrupt generation and Write-1-to-Clear (W1C) clearing mechanism
 
+## FPGA Verification
+
+Synthesized into `can_controller_top.sv` and interfaced with a hardware UART command bridge running at 115200 baud on the Nexys 4 DDR board, enabling external host PC control and telemetry monitoring.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -434,6 +475,8 @@ The core provides an internal loopback mode for hardware-independent verificatio
 ```text
 can_top/can_top.srcs/sources_1/new/can_controller_top.sv
 can_top/can_top.srcs/sources_1/new/can_rx_assembler.sv
+can_top/can_top.srcs/sources_1/new/nexys4_can_top.sv
+can_top/can_top.srcs/constrs_1/new/nexys4_ddr_can.xdc
 can_top/can_top.srcs/sim_1/new/tb_can_controller_top.sv
 ```
 
@@ -448,9 +491,16 @@ Tests include:
 - Acceptance filtering rejection and acceptance in loopback
 - Host interrupt handling and FIFO pop verification
 
+## FPGA Verification
+
+Synthesized, placed, and routed using Vivado 2023.2 on the **AMD Xilinx Artix-7 XC7A100T-1CSG324C** device (`nexys4_can_top.bit`):
+- **Resource Utilization:** 1,121 Slice LUTs (1.77%), 877 Slice Registers (0.69%), 1.5 Block RAM tiles (1.11%).
+- **Timing Closure:** Confirmed clean timing at 100 MHz system clock ($WNS > 0$).
+- **Power:** Estimated $\approx 15.4$ mW dynamic power consumption.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -482,9 +532,15 @@ Verified using a dual-node system testbench covering six test scenarios (64/64 a
 - **T5: Reverse Arbitration (Node B Wins)**: Node B (`ID 0x250`) and Node A (`ID 0x270`) transmit simultaneously. Node A detects arbitration loss at bit `ID[5]`, demotes to receiver, and automatically retransmits after Node B completes.
 - **T6: Multi-Node Acceptance Filtering & Burst Transfers**: Node B rejects non-matching frame `0x401` while providing bus ACK; Node B accepts matching frame `0x400`. Node B transmits three back-to-back burst frames (`0x101`, `0x102`, `0x103`), filling Node A's FIFO to count 3, followed by sequential FIFO pop and validation.
 
+## FPGA Verification
+
+Demonstrated on physical hardware connecting the Nexys 4 DDR FPGA to the Arduino Uno + MCP2515 CAN transceiver node over a 500 kbps differential CAN bus:
+- **Scenario A (FPGA Wins):** FPGA transmits higher-priority frame `0x099` while Arduino transmits `0x155`. Arduino detects arbitration loss, backs off, and retransmits `0x155` after FPGA frame completion without bus corruption.
+- **Scenario B (Arduino Wins):** Arduino transmits higher-priority frame `0x099` while FPGA transmits `0x155`. FPGA detects arbitration loss at bit level, transitions to receiver mode, receives `0x099`, and retransmits `0x155` on the next bus cycle.
+
 ## Status
 
-**Completed and verified in simulation.**
+**Completed and verified on FPGA.**
 
 ---
 
@@ -493,3 +549,45 @@ Verified using a dual-node system testbench covering six test scenarios (64/64 a
 A separate CAN simulation was also performed using Arduino hardware.
 
 Additional CAN controller modules will be documented here as they are developed.
+
+---
+
+# PC -> FPGA -> Arduino Hardware Demonstration
+
+## Overview
+
+Physical CAN communication experiments were conducted using an Arduino Uno paired with an MCP2515 CAN controller and TJA1050 transceiver module. These experiments served as the physical hardware counterpart to co-verify the FPGA CAN controller IP core over a 500 kbps differential bus.
+
+## Integrated Hardware Co-Verification with FPGA
+
+An interactive firmware sketch (`can_menu_demo.ino`) was developed for the Arduino Uno, providing menu-selectable operational modes for full-duplex hardware verification with the Nexys 4 DDR FPGA:
+
+```text
+=====================================================
+===   CAN CONTROLLER MULTI-FEATURE TEST HARNESS   ===
+=====================================================
+ [1] Transmit Periodic Frame (ID: 0x244, every 1.5s)
+ [2] Continuous Bus Monitor / Receiver
+ [3] Simultaneous Collision Test 1 (Arduino ID: 0x155, LOW)
+ [4] Simultaneous Collision Test 2 (Arduino ID: 0x099, HIGH)
+ [5] Hardware Acceptance Filtering Test (Cycles 4 IDs)
+ [r] Reset MCP2515 Controller
+ [c] Cancel / Stop Active Mode
+=====================================================
+```
+
+### Verified Hardware Test Scenarios:
+
+1. **FPGA-to-Arduino Transmission:** FPGA controller transmits 8-byte frames at 500 kbps; Arduino receiver decodes payloads and prints to Serial Monitor and LCD with 0 errors.
+2. **Arduino-to-FPGA Transmission:** Arduino transmits `0x244` frames; FPGA deserializer captures payloads into Block RAM FIFO, blinks `LED7`, and displays the identifier across `LED[11:8]` and `LED[5:0]`.
+3. **Physical Error Injection & Recovery:** Disconnecting the CAN-H or CAN-L bus wire during transmission causes missing ACK slots. The FPGA Error Management Logic increments TEC by +8 on each failure until reaching Error-Passive mode (`TEC > 128`), then decrements TEC by -1 upon wire reconnection until healing back to 0.
+4. **Bitwise Arbitration (CSMA/CD + NDA):** Validated non-destructive arbitration during simultaneous transmissions (Options 3 & 4). Lower numerical IDs reliably win the bus while the losing node defers without frame damage.
+5. **Hardware Acceptance Filtering (Option 5):** Arduino transmits a cycling 4-frame sequence (`0x244`, `0x3AA`, `0x260`, `0x555`). With FPGA filter active (`SW[1]=1`, range `0x200`--`0x27F`), only `0x244` and `0x260` enter the RX FIFO, while out-of-range frames `0x3AA` and `0x555` are dropped at the MAC layer, flashing `LED14`.
+
+## Real-Time Monitoring & Telemetry
+
+A real-time Python monitoring suite (`can_dashboard.py` / `can_dual_dashboard.py`) connects to the FPGA and Arduino serial ports, providing live traffic logging, message counting, error counter telemetry, and automated CSV/TXT logging.
+
+## Complete CAN protocol demo
+
+[DEMO VIDEO](https://jklujaipur-my.sharepoint.com/:v:/g/personal/prathambansal_jklu_edu_in/IQD3o7uQQIpgS7sax0D8UcV5AbjaQXAVEHviv9LBm5sWLi4?e=Ey28RW)

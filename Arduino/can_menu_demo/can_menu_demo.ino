@@ -43,7 +43,8 @@ enum NodeMode {
   MODE_TX,
   MODE_RX,
   MODE_ARB_LOSE, // Arduino sends 0x244 (FPGA 0x155 wins)
-  MODE_ARB_WIN   // Arduino sends 0x099 (Arduino 0x099 wins)
+  MODE_ARB_WIN,  // Arduino sends 0x099 (Arduino 0x099 wins)
+  MODE_FILTER    // Acceptance Filter Test (Cycles: 0x244, 0x3AA, 0x260, 0x555)
 };
 
 NodeMode currentMode = MODE_IDLE;
@@ -51,6 +52,7 @@ unsigned long lastTxTime = 0;
 const unsigned long txInterval = 1500; // 1.5s auto-send interval
 uint32_t txCount = 0;
 uint32_t rxCount = 0;
+uint8_t filterStep = 0;
 
 void printMenu() {
   Serial.println();
@@ -61,9 +63,10 @@ void printMenu() {
   Serial.println(F("  [2] Receive Mode       : Listen for incoming frames from FPGA"));
   Serial.println(F("  [3] Arbitration Test 1 : Low Priority (0x244) -> FPGA 0x155 Wins"));
   Serial.println(F("  [4] Arbitration Test 2 : High Priority (0x099) -> Arduino 0x099 Wins"));
+  Serial.println(F("  [5] Filter Test (Demo) : Cycle 0x244, 0x3AA, 0x260, 0x555"));
   Serial.println(F("  [c] Cancel / Stop      : Halt active mode & return to menu"));
   Serial.println(F("============================================================="));
-  Serial.print(F("Select an option [1, 2, 3, 4, c]: "));
+  Serial.print(F("Select an option [1, 2, 3, 4, 5, c]: "));
 }
 
 void setup() {
@@ -263,6 +266,22 @@ void loop() {
       Serial.println(F("  Press 'c' to return to menu."));
       Serial.println(F("=================================================================="));
     }
+    else if (cmd == '5') {
+      currentMode = MODE_FILTER;
+      lastTxTime = 0;
+      filterStep = 0;
+      Serial.println(F("5"));
+      Serial.println(F("\n=================================================================="));
+      Serial.println(F(">>> [MODE 5: HARDWARE ACCEPTANCE FILTER TEST] <<<"));
+      Serial.println(F("  FPGA Filter Range: 0x200 to 0x27F (ACTIVE when SW[1] is ON)"));
+      Serial.println(F("  Automated cycle sends:"));
+      Serial.println(F("    [1] ID: 0x244 -> IN RANGE     -> EXPECT: ACCEPTED (Logged)"));
+      Serial.println(F("    [2] ID: 0x3AA -> OUT OF RANGE -> EXPECT: REJECTED (Dropped in HW)"));
+      Serial.println(F("    [3] ID: 0x260 -> IN RANGE     -> EXPECT: ACCEPTED (Logged)"));
+      Serial.println(F("    [4] ID: 0x555 -> OUT OF RANGE -> EXPECT: REJECTED (Dropped in HW)"));
+      Serial.println(F("  Press 'c' to return to menu."));
+      Serial.println(F("=================================================================="));
+    }
     else if (cmd == 's' || cmd == 'S') {
       if (currentMode == MODE_ARB_LOSE) {
         sendArbitrationFrame(0x244, false);
@@ -410,6 +429,61 @@ void loop() {
     if (now - lastTxTime >= 150) { // Fast 150ms interval to guarantee bus collisions with FPGA
       lastTxTime = now;
       sendArbitrationFrame(0x099, true);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mode 5: Hardware Acceptance Filter Demonstration
+  // ---------------------------------------------------------------------------
+  else if (currentMode == MODE_FILTER) {
+    // Continuously drain incoming frames
+    if (mcp2515.readMessage(&rxMsg) == MCP2515::ERROR_OK) {
+      rxCount++;
+    }
+
+    unsigned long now = millis();
+    if (now - lastTxTime >= 1500) { // Send every 1.5s so each frame is easily visible
+      lastTxTime = now;
+      txCount++;
+
+      uint16_t testId;
+      bool inRange;
+
+      if (filterStep == 0) {
+        testId = 0x244; inRange = true;
+      } else if (filterStep == 1) {
+        testId = 0x3AA; inRange = false;
+      } else if (filterStep == 2) {
+        testId = 0x260; inRange = true;
+      } else {
+        testId = 0x555; inRange = false;
+      }
+      filterStep = (filterStep + 1) % 4;
+
+      txMsg.can_id  = testId;
+      txMsg.can_dlc = 4;
+      txMsg.data[0] = inRange ? 0xAC : 0xDE;
+      txMsg.data[1] = inRange ? 0xCE : 0xAD;
+      txMsg.data[2] = (txCount >> 8) & 0xFF;
+      txMsg.data[3] = txCount & 0xFF;
+
+      Serial.print(F("[FILTER-TX #"));
+      Serial.print(txCount);
+      Serial.print(F("] ID: 0x"));
+      Serial.print(testId, HEX);
+      Serial.print(F(" | DATA: "));
+      for (int i = 0; i < 4; i++) {
+        if (txMsg.data[i] < 0x10) Serial.print(F("0"));
+        Serial.print(txMsg.data[i], HEX);
+        Serial.print(F(" "));
+      }
+      if (inRange) {
+        Serial.println(F("-> [IN RANGE: 0x200-0x27F] ==> EXPECT: ACCEPTED"));
+      } else {
+        Serial.println(F("-> [OUT OF RANGE]         ==> EXPECT: REJECTED BY FPGA"));
+      }
+
+      mcp2515.sendMessage(&txMsg);
     }
   }
 }
